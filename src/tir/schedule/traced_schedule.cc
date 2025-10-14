@@ -539,11 +539,33 @@ BlockRV TracedScheduleNode::DecomposeReduction(const BlockRV& block_rv, const Lo
   return result;
 }
 
-BlockRV TracedScheduleNode::RFactor(const LoopRV& loop_rv, int factor_axis) {
-  BlockRV result = ConcreteScheduleNode::RFactor(loop_rv, factor_axis);
+BlockRV TracedScheduleNode::RFactor(const LoopRV& loop_rv, int factor_axis, bool merge_loops) {
+  BlockRV result = ConcreteScheduleNode::RFactor(loop_rv, factor_axis, merge_loops);
   static const InstructionKind& kind = InstructionKind::Get("RFactor");
   trace_->Append(/*inst=*/Instruction(/*kind=*/kind,
                                       /*inputs=*/{loop_rv},
+                                      /*attrs=*/{Integer(factor_axis), Bool(merge_loops)},
+                                      /*outputs=*/{result}));
+  return result;
+}
+
+BlockRV TracedScheduleNode::RollingUpdate(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                          int factor_axis) {
+  BlockRV result = ConcreteScheduleNode::RollingUpdate(block_rv, loop_rv, factor_axis);
+  static const InstructionKind& kind = InstructionKind::Get("RollingUpdate");
+  trace_->Append(/*inst=*/Instruction(/*kind=*/kind,
+                                      /*inputs=*/{block_rv, loop_rv},
+                                      /*attrs=*/{Integer(factor_axis)},
+                                      /*outputs=*/{result}));
+  return result;
+}
+
+BlockRV TracedScheduleNode::SplitKUpdate(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                         int factor_axis) {
+  BlockRV result = ConcreteScheduleNode::SplitKUpdate(block_rv, loop_rv, factor_axis);
+  static const InstructionKind& kind = InstructionKind::Get("SplitKUpdate");
+  trace_->Append(/*inst=*/Instruction(/*kind=*/kind,
+                                      /*inputs=*/{block_rv, loop_rv},
                                       /*attrs=*/{Integer(factor_axis)},
                                       /*outputs=*/{result}));
   return result;
@@ -695,8 +717,8 @@ void TracedScheduleNode::TransformBlockLayout(const BlockRV& block_rv, const Ind
   static const InstructionKind& kind = InstructionKind::Get("TransformBlockLayout");
   trace_->Append(
       /*inst=*/Instruction(/*kind=*/kind,
-                           /*inputs=*/{block_rv},
-                           /*attrs=*/{index_map},
+                           /*inputs=*/{block_rv, index_map},
+                           /*attrs=*/{},
                            /*outputs=*/{}));
 }
 
@@ -747,6 +769,19 @@ void TracedScheduleNode::RollingBuffer(const BlockRV& block_rv, int write_buffer
       /*outputs=*/{}));
 }
 
+Array<BlockRV> TracedScheduleNode::SplitScanBuffer(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                                   int write_buffer_index) {
+  Array<BlockRV> result =
+      ConcreteScheduleNode::SplitScanBuffer(block_rv, loop_rv, write_buffer_index);
+  static const InstructionKind& kind = InstructionKind::Get("SplitScanBuffer");
+  trace_->Append(/*inst=*/Instruction(
+      /*kind=*/kind,
+      /*inputs=*/{block_rv, loop_rv},
+      /*attrs=*/{Integer(write_buffer_index)},
+      /*outputs=*/{result.begin(), result.end()}));
+  return result;
+}
+
 /******** Schedule: Misc ********/
 
 void TracedScheduleNode::EnterPostproc() {
@@ -755,6 +790,16 @@ void TracedScheduleNode::EnterPostproc() {
   trace_->Append(/*inst=*/Instruction(/*kind=*/kind,
                                       /*inputs=*/{},
                                       /*attrs=*/{},
+                                      /*outputs=*/{}));
+}
+
+void TracedScheduleNode::PropagateIfThenElse(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                             String registered_handler) {
+  ConcreteScheduleNode::PropagateIfThenElse(block_rv, loop_rv, registered_handler);
+  static const InstructionKind& kind = InstructionKind::Get("PropagateIfThenElse");
+  trace_->Append(/*inst=*/Instruction(/*kind=*/kind,
+                                      /*inputs=*/{block_rv, loop_rv},
+                                      /*attrs=*/{registered_handler},
                                       /*outputs=*/{}));
 }
 
@@ -767,6 +812,67 @@ void TracedScheduleNode::UnsafeHideBufferAccess(const BlockRV& block_rv, const S
       /*inputs=*/{block_rv, buf_type, buf_index_array},
       /*attrs=*/{},
       /*outputs=*/{}));
+}
+
+/******** Schedule: Function passes (buffer compactification, loop-tile conversion) ********/
+
+struct CompactBufferTraits : public UnpackedInstTraits<CompactBufferTraits> {
+  static constexpr const char* kName = "compact_buffer";
+  static constexpr bool kIsPure = false;
+
+ private:
+  static constexpr size_t kNumInputs = 0;
+  static constexpr size_t kNumAttrs = 0;
+  static constexpr size_t kNumDecisions = 0;
+
+  static void UnpackedApplyToSchedule(Schedule sch) { sch->CompactBuffer(); }
+
+  static String UnpackedAsPython(Array<String> outputs) {
+    PythonAPICall py("compact_buffer");
+    return py.Str();
+  }
+
+  template <typename>
+  friend struct ::tvm::tir::UnpackedInstTraits;
+};
+
+struct ToTileExprFormTraits : public UnpackedInstTraits<ToTileExprFormTraits> {
+  static constexpr const char* kName = "to_tile_expr_form";
+  static constexpr bool kIsPure = false;
+
+  static constexpr size_t kNumInputs = 1;
+  static constexpr size_t kNumAttrs = 0;
+  static constexpr size_t kNumDecisions = 0;
+
+  static void UnpackedApplyToSchedule(Schedule sch, Array<LoopRV> blockize_hints) {
+    sch->ToTileExprForm(blockize_hints);
+  }
+
+  static String UnpackedAsPython(Array<String> outputs, Array<String> blockize_hints) {
+    PythonAPICall py("to_tile_expr_form");
+    py.Input("blockize_hints", blockize_hints);
+    return py.Str();
+  }
+
+  template <typename>
+  friend struct ::tvm::tir::UnpackedInstTraits;
+};
+
+TVM_REGISTER_INST_KIND_TRAITS(CompactBufferTraits);
+TVM_REGISTER_INST_KIND_TRAITS(ToTileExprFormTraits);
+
+void TracedScheduleNode::CompactBuffer() {
+  ConcreteScheduleNode::CompactBuffer();
+  static const InstructionKind& kind = InstructionKind::Get("compact_buffer");
+  trace_->Append(
+      /*inst=*/Instruction(/*kind=*/kind, /*inputs=*/{}, /*attrs=*/{}, /*outputs=*/{}));
+}
+
+void TracedScheduleNode::ToTileExprForm(const Array<LoopRV>& blockize_hints) {
+  ConcreteScheduleNode::ToTileExprForm(blockize_hints);
+  static const InstructionKind& kind = InstructionKind::Get("to_tile_expr_form");
+  trace_->Append(/*inst=*/Instruction(/*kind=*/kind, /*inputs=*/{blockize_hints},
+                                      /*attrs=*/{}, /*outputs=*/{}));
 }
 
 }  // namespace tir

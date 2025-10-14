@@ -71,6 +71,11 @@ void StmtVisitor::VisitStmt_(const BufferStoreNode* op) {
   VisitArray(op->indices, [this](const PrimExpr& e) { this->VisitExpr(e); });
 }
 
+void StmtVisitor::VisitStmt_(const BufferRegionStoreNode* op) {
+  this->VisitExpr(op->region);
+  this->VisitExpr(op->value);
+}
+
 void StmtVisitor::VisitStmt_(const BufferRealizeNode* op) {
   VisitArray(op->bounds, [this](const Range& r) {
     this->VisitExpr(r->min);
@@ -376,6 +381,16 @@ Stmt StmtMutator::VisitStmt_(const BufferStoreNode* op) {
     n->value = std::move(value);
     n->indices = std::move(indices);
     return Stmt(n);
+  }
+}
+
+Stmt StmtMutator::VisitStmt_(const BufferRegionStoreNode* op) {
+  BufferRegion region = Downcast<BufferRegion>(this->VisitExpr(op->region));
+  PrimExpr value = this->VisitExpr(op->value);
+  if (region.same_as(op->region) && value.same_as(op->value)) {
+    return GetRef<Stmt>(op);
+  } else {
+    return BufferRegionStore(region, value, op->span);
   }
 }
 

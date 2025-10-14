@@ -15,13 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 """Meta schedule integration with high-level IR"""
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 import warnings
-
-# isort: off
-from typing_extensions import Literal
-
-# isort: on
+from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Tuple, Union
 
 from tvm._ffi import get_global_func, register_func
 from tvm.ir import IRModule
@@ -55,7 +50,7 @@ _extract_task_func = get_global_func(  # pylint: disable=invalid-name
 
 def extract_tasks(
     mod: Union[IRModule, "relax.Function"],
-    target: Target,
+    target: str | Target,
     params: Optional[Dict[str, NDArray]] = None,
     module_equality: str = "structural",
 ) -> List[ExtractedTask]:
@@ -159,7 +154,7 @@ def extracted_tasks_to_tune_contexts(
 
 def tune_relax(
     mod: Union[IRModule, "relax.Function"],
-    params: Dict[str, NDArray],
+    params: Dict[str, NDArray] | None,
     target: Union[str, Target],
     work_dir: str,
     max_trials_global: int,
@@ -405,8 +400,8 @@ def compile_relax(
         The built runtime module or vm Executable for the given relax workload.
     """
     # pylint: disable=import-outside-toplevel
-    from tvm.relax.transform import BindParams, MetaScheduleApplyDatabase
     from tvm.relax import build as relax_build
+    from tvm.relax.transform import BindParams, MetaScheduleApplyDatabase
 
     # pylint: enable=import-outside-toplevel
     if not isinstance(target, Target):

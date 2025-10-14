@@ -79,6 +79,8 @@ ArgInfo ArgInfo::FromJSON(const ObjectRef& json_obj) {
   // Step 2. Dispatch the tag to corresponding subclass of ArgInfo
   if (tag == "TENSOR") {
     return TensorInfo::FromJSON(json_obj);
+  } else if (tag == "SCALAR") {
+    return ScalarInfo::FromJSON(json_obj);
   }
   LOG(FATAL) << "ValueError: Unable to parse the JSON object: " << json_obj;
   throw;
@@ -89,12 +91,12 @@ Array<ArgInfo> ArgInfo::FromPrimFunc(const tir::PrimFunc& func) {
   Array<ArgInfo> result;
   result.reserve(func->params.size());
   for (const tir::Var& arg : func->params) {
-    if (Optional<tir::Buffer> _buffer = func->buffer_map.Get(arg)) {
+    if (auto _buffer = func->buffer_map.Get(arg)) {
       tir::Buffer buffer = _buffer.value();
       result.push_back(TensorInfo(/*dtype=*/buffer->dtype,
                                   /*shape=*/AsVector<PrimExpr, int64_t>(buffer->shape)));
     } else {
-      LOG(FATAL) << "ValueError: Unsupported argument type: " << arg;
+      result.push_back(ScalarInfo(arg->dtype));
     }
   }
   return result;
@@ -148,6 +150,28 @@ TensorInfo TensorInfo::FromJSON(const ObjectRef& json_obj) {
   return TensorInfo(DataType(dtype), ShapeTuple(s.begin(), s.end()));
 }
 
+/******** ScalarInfo ********/
+
+ObjectRef ScalarInfoNode::AsJSON() const {
+  static String tag = "SCALAR";
+  String dtype = DLDataType2String(this->dtype);
+  return Array<ObjectRef>{tag, dtype};
+}
+
+ScalarInfo ScalarInfo::FromJSON(const ObjectRef& json_obj) {
+  DLDataType dtype;
+  try {
+    const ArrayNode* json_array = json_obj.as<ArrayNode>();
+    CHECK(json_array && json_array->size() == 2);
+    String dtype_str = Downcast<String>(json_array->at(1));
+    dtype = runtime::String2DLDataType(dtype_str);
+  } catch (const std::runtime_error& e) {  // includes tvm::Error and dmlc::Error
+    LOG(FATAL) << "ValueError: Unable to parse the JSON object: " << json_obj
+               << "\nThe error is: " << e.what();
+  }
+  return ScalarInfo(DataType(dtype));
+}
+
 /******** Repr ********/
 
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
@@ -161,6 +185,7 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
 
 TVM_REGISTER_OBJECT_TYPE(ArgInfoNode);
 TVM_REGISTER_NODE_TYPE(TensorInfoNode);
+TVM_REGISTER_NODE_TYPE(ScalarInfoNode);
 
 TVM_REGISTER_GLOBAL("meta_schedule.ArgInfoAsJSON").set_body_method<ArgInfo>(&ArgInfoNode::AsJSON);
 TVM_REGISTER_GLOBAL("meta_schedule.ArgInfoFromPrimFunc").set_body_typed(ArgInfo::FromPrimFunc);

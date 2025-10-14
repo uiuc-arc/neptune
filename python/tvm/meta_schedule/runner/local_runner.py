@@ -16,9 +16,9 @@
 # under the License.
 """Local Runner"""
 import logging
+import subprocess
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Union
-import subprocess
 
 import tvm
 
@@ -302,8 +302,8 @@ class LocalRunner(PyRunner):
                 tuple(arg_info.as_json() for arg_info in runner_input.args_info),
             )
             try:
-                result: List[float] = future.result()
-                error_message: str = None
+                result: List[float] | None = future.result()
+                error_message: str | None = None
             except TimeoutError:
                 result = None
                 error_message = f"LocalRunner: Timeout, killed after {self.timeout_sec} seconds\n"

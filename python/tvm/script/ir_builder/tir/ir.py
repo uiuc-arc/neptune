@@ -18,8 +18,9 @@
 
 import functools
 import inspect
-from numbers import Integral
 import sys
+from collections.abc import Callable, Sequence
+from numbers import Integral
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 # isort: off
@@ -29,8 +30,7 @@ from typing_extensions import Literal
 
 import numpy as np  # type: ignore
 
-from tvm import tir
-from tvm import ir
+from tvm import ir, tir
 from tvm.ir import Type
 from tvm.ir.base import deprecated
 from tvm.runtime import String, convert, ndarray
@@ -38,9 +38,8 @@ from tvm.target import Target
 
 # pylint: disable=unused-import
 from tvm.target.codegen import llvm_lookup_intrinsic_id
-from tvm.tir import Buffer, BufferRegion, IndexMap, PrimExpr
+from tvm.tir import Buffer, IndexMap, PrimExpr, type_annotation
 from tvm.tir import op as _tir_op
-from tvm.tir import type_annotation
 
 # import tir.expr for direct ir construction to pass structural_equal comparison
 from tvm.tir.expr import (
@@ -54,6 +53,7 @@ from tvm.tir.expr import (
     And,
     Broadcast,
     BufferLoad,
+    BufferRegion,
     Call,
     CallEffectKind,
     Cast,
@@ -86,6 +86,9 @@ from . import _ffi_api, frame
 from .external_kernel import call_kernel
 
 # pylint: enable=unused-import
+
+ExprOrInt = PrimExpr | int
+ExprOrExprs = Sequence[ExprOrInt] | ExprOrInt
 
 
 def buffer(
@@ -240,17 +243,17 @@ def func_ret(ret_type: Type) -> Type:
 
 
 def match_buffer(
-    param: Union[Var, BufferLoad, BufferRegion],
-    shape: Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral] = None,
+    param: Var | BufferLoad | BufferRegion,
+    shape: ExprOrExprs | None = None,
     dtype: str = "float32",
-    data: Var = None,
-    strides: List[PrimExpr] = None,
-    elem_offset: PrimExpr = None,
+    data: Var | None = None,
+    strides: list[PrimExpr] | None = None,
+    elem_offset: PrimExpr | None = None,
     scope: str = "global",
     align: int = -1,
     offset_factor: int = 0,
     buffer_type: str = "default",
-    axis_separators: List[int] = None,
+    axis_separators: list[int] | None = None,
 ) -> Buffer:
     """The buffer match function.
 
@@ -437,7 +440,7 @@ def block_attr(attrs: Dict[str, Any]) -> None:
 
 
 def alloc_buffer(
-    shape: Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral],
+    shape: ExprOrExprs,
     dtype: str = "float32",
     data: Var = None,
     strides: List[PrimExpr] = None,
@@ -452,7 +455,7 @@ def alloc_buffer(
 
     Parameters
     ----------
-    shape : Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral]
+    shape : Sequence[PrimExpr | int] | PrimExpr | int
         The type of the buffer prior to flattening.
 
     dtype : str
@@ -533,15 +536,15 @@ class axis:  # pylint: disable=invalid-name
 
     @staticmethod
     def spatial(
-        dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
-        binding: PrimExpr,
+        dom: ir.Range | ExprOrExprs,
+        binding: ExprOrInt,
         dtype: str = "int32",
     ) -> Var:
         """The spatial block axis defining function.
 
         Parameters
         ----------
-        dom : Union[Range, List[PrimExpr], Tuple[PrimExpr]]
+        dom : Range | Sequence[PrimExpr | int] | PrimExpr | int
             The domain of the iteration variable.
 
         binding : PrimExpr
@@ -561,7 +564,7 @@ class axis:  # pylint: disable=invalid-name
 
     @staticmethod
     def reduce(
-        dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
+        dom: ir.Range | ExprOrExprs,
         binding: PrimExpr,
         dtype: str = "int32",
     ) -> Var:
@@ -569,7 +572,7 @@ class axis:  # pylint: disable=invalid-name
 
         Parameters
         ----------
-        dom : Union[Range, List[PrimExpr], Tuple[PrimExpr]]
+        dom : Range | Sequence[PrimExpr | int] | PrimExpr | int
             The domain of the iteration variable.
 
         binding : PrimExpr
@@ -589,7 +592,7 @@ class axis:  # pylint: disable=invalid-name
 
     @staticmethod
     def scan(
-        dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
+        dom: Union[ir.Range, int, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
         dtype: str = "int32",
     ) -> Var:
@@ -673,7 +676,10 @@ class axis:  # pylint: disable=invalid-name
 
 
 def serial(
-    start: PrimExpr, stop: PrimExpr = None, *, annotations: Dict[str, Any] = None
+    start: int | PrimExpr,
+    stop: int | PrimExpr | None = None,
+    *,
+    annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """The serial For statement.
 
@@ -793,11 +799,11 @@ def unroll(
 
 
 def thread_binding(
-    start: PrimExpr,
-    stop: PrimExpr = None,
-    thread: str = None,
+    start: PrimExpr | int,
+    stop: PrimExpr | int | None = None,
+    thread: str | None = None,
     *,
-    annotations: Dict[str, Any] = None,
+    annotations: Dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """The thread-binding For statement.
 
@@ -840,7 +846,7 @@ def thread_binding(
     )
 
 
-def grid(*extents: PrimExpr) -> frame.ForFrame:
+def grid(*extents: int | PrimExpr) -> frame.ForFrame:
     """The grid For statement.
 
     Parameters
@@ -1266,7 +1272,7 @@ def env_thread(thread_tag: str, dtype: str = "int32") -> IterVar:
 def buffer_store(
     buffer: Buffer,  # pylint: disable=redefined-outer-name
     value: PrimExpr,
-    indices: List[Union[PrimExpr, slice]],
+    indices: Sequence[ExprOrInt | slice],
     predicate: Optional[PrimExpr] = None,
 ) -> None:
     """Buffer store node.
@@ -1289,9 +1295,6 @@ def buffer_store(
     """
     from tvm.arith import Analyzer  # pylint: disable=import-outside-toplevel
 
-    if not isinstance(indices, (list, tuple, ir.Array)):
-        indices = [indices]
-
     expr_indices = []
     for index in indices:
         if isinstance(index, slice):
@@ -1307,6 +1310,12 @@ def buffer_store(
         value = IntImm("bool", value)
     return _ffi_api.BufferStore(  # type: ignore[attr-defined] # pylint: disable=no-member
         buffer, value, expr_indices, predicate
+    )
+
+
+def buffer_region_store(buffer_region: BufferRegion, value: PrimExpr) -> None:
+    return _ffi_api.BufferRegionStore(  # type: ignore[attr-defined] # pylint: disable=no-member
+        buffer_region, value
     )
 
 
@@ -1455,7 +1464,7 @@ e5m2_float8x64 = func_gen(("E5M2Float8x64"))
 # pylint: enable=invalid-name
 
 
-def boolean(expr: Optional[PrimExpr] = None, is_size_var: bool = False) -> PrimExpr:
+def boolean(expr: PrimExpr | bool | None = None, is_size_var: bool = False) -> PrimExpr:
     """Construct a new tir.Var with type boolean or cast expression to type boolean.
 
     Parameters
@@ -1904,6 +1913,15 @@ anylist_resetitem = _op_wrapper(_tir_op.anylist_resetitem)
 anylist_setitem_call_packed = _op_wrapper(_tir_op.anylist_setitem_call_packed)
 anylist_setitem_call_cpacked = _op_wrapper(_tir_op.anylist_setitem_call_cpacked)
 vscale = _op_wrapper(_tir_op.vscale)
+triton_full = _op_wrapper(_tir_op.triton_full)
+triton_dot = _op_wrapper(_tir_op.triton_dot)
+triton_reduce = _op_wrapper(_tir_op.triton_reduce)
+triton_load = _op_wrapper(_tir_op.triton_load)
+triton_store = _op_wrapper(_tir_op.triton_store)
+triton_make_block_ptr = _op_wrapper(_tir_op.triton_make_block_ptr)
+triton_permute = _op_wrapper(_tir_op.triton_permute)
+triton_arange = _op_wrapper(_tir_op.triton_arange)
+triton_where = _op_wrapper(_tir_op.triton_where)
 
 
 def _dtype_forward(func):
@@ -2061,6 +2079,7 @@ __all__ = [
     "launch_thread",
     "env_thread",
     "buffer_store",
+    "buffer_region_store",
     "prefetch",
     "evaluate",
     "boolean",
@@ -2213,6 +2232,15 @@ __all__ = [
     "broadcast",
     "ramp",
     "cast",
+    "triton_full",
+    "triton_dot",
+    "triton_reduce",
+    "triton_load",
+    "triton_store",
+    "triton_make_block_ptr",
+    "triton_permute",
+    "triton_arange",
+    "triton_where",
     # tvm.tir.expr
     "Var",
     "SizeVar",
@@ -2241,6 +2269,7 @@ __all__ = [
     "Not",
     "Select",
     "BufferLoad",
+    "BufferRegion",
     "ProducerLoad",
     "Ramp",
     "Broadcast",

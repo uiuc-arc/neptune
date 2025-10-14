@@ -75,15 +75,12 @@ class SpaceGenerator;
 */
 class SpaceGeneratorNode : public runtime::Object {
  public:
-  /*! \brief The schedule rules. */
-  Optional<Array<ScheduleRule>> sch_rules;
   /*! \brief The postprocessors. */
   Optional<Array<Postproc>> postprocs;
   /*! \brief The probability of using certain mutator. */
   Optional<Map<Mutator, FloatImm>> mutator_probs;
 
   void VisitAttrs(tvm::AttrVisitor* v) {
-    v->Visit("sch_rules", &sch_rules);
     v->Visit("postprocs", &postprocs);
     v->Visit("mutator_probs", &mutator_probs);
   }
@@ -144,7 +141,6 @@ class SpaceGenerator : public runtime::ObjectRef {
  public:
   /*!
    * \brief Create a design space generator with customized methods on the python-side.
-   * \param sch_rules The schedule rules.
    * \param postprocs The postprocessors.
    * \param mutator_probs The probability of using certain mutator.
    * \param f_initialize_with_tune_context The packed function of `InitializeWithTuneContext`.
@@ -153,8 +149,7 @@ class SpaceGenerator : public runtime::ObjectRef {
    * \return The design space generator created.
    */
   TVM_DLL static SpaceGenerator PySpaceGenerator(
-      Optional<Array<ScheduleRule>> sch_rules, Optional<Array<Postproc>> postprocs,
-      Optional<Map<Mutator, FloatImm>> mutator_probs,
+      Optional<Array<Postproc>> postprocs, Optional<Map<Mutator, FloatImm>> mutator_probs,
       FInitializeWithTuneContext f_initialize_with_tune_context,
       FGenerateDesignSpace f_generate_design_space, FClone f_clone);
   /*!
@@ -163,24 +158,20 @@ class SpaceGenerator : public runtime::ObjectRef {
    * 1) void(Schedule)
    * 2) Schedule(Schedule)
    * 3) Array<Schedule>(Schedule)
-   * \param sch_rules The schedule rules.
    * \param postprocs The postprocessors.
    * \param mutator_probs The probability of using certain mutator.
    */
   TVM_DLL static SpaceGenerator ScheduleFn(PackedFunc schedule_fn,
-                                           Optional<Array<ScheduleRule>> sch_rules,
                                            Optional<Array<Postproc>> postprocs,
                                            Optional<Map<Mutator, FloatImm>> mutator_probs);
   /*!
    * \brief Create a design space generator that is union of multiple design space generators.
    * \param space_generators An array of design space generators to be unioned.
-   * \param sch_rules The schedule rules.
    * \param postprocs The postprocessors.
    * \param mutator_probs The probability of using certain mutator.
    * \return The design space generator created.
    */
   TVM_DLL static SpaceGenerator SpaceGeneratorUnion(Array<SpaceGenerator, void> space_generators,
-                                                    Optional<Array<ScheduleRule>> sch_rules,
                                                     Optional<Array<Postproc>> postprocs,
                                                     Optional<Map<Mutator, FloatImm>> mutator_probs);
   /*!
@@ -198,6 +189,15 @@ class SpaceGenerator : public runtime::ObjectRef {
                                                Optional<Map<Mutator, FloatImm>> mutator_probs);
   TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(SpaceGenerator, ObjectRef, SpaceGeneratorNode);
 };
+
+String GetRuleKindFromTarget(const Target& target);
+
+/*!
+ * \brief The helper function to clone schedule rules, postprocessors, and mutators.
+ * \param src The source space generator.
+ * \param dst The destination space generator.
+ */
+void CloneRules(const SpaceGeneratorNode* src, SpaceGeneratorNode* dst);
 
 /*! \brief The design space generator with customized methods on the python-side. */
 class PySpaceGeneratorNode : public SpaceGeneratorNode {

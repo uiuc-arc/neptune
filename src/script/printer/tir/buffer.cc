@@ -244,29 +244,41 @@ Array<Doc> BufferIndices(const Array<PrimExpr>& indices, const ObjectPath& p,
   return indices_doc;
 }
 
-Array<Doc> BufferSlices(const Array<Range>& region, const ObjectPath& p, const IRDocsifier& d) {
+Array<Doc> BufferSlices(const Array<tir::ExprOrRangeOrNull>& region, const ObjectPath& p,
+                        const IRDocsifier& d) {
   int n = region.size();
-  Array<Doc> indices;
-  indices.reserve(n);
+  Array<Doc> docs;
+  docs.reserve(n);
   for (int i = 0; i < n; ++i) {
-    Range range = region[i];
+    auto slice = region[i];
     ObjectPath range_p = p->ArrayIndex(i);
-    ExprDoc min = d->AsDoc<ExprDoc>(range->min, range_p->Attr("min"));
-    if (tir::is_one(range->extent)) {
-      indices.push_back(min);
+    if (auto expr = slice.as<PrimExpr>()) {
+      docs.push_back(d->AsDoc<ExprDoc>(expr.value(), range_p));
+    } else if (auto range = slice.as<Range>()) {
+      auto min = range.value()->min;
+      auto extent = min + range.value()->extent;
+      docs.push_back(SliceDoc(d->AsDoc<ExprDoc>(min, range_p->Attr("min")),
+                              d->AsDoc<ExprDoc>(extent, range_p->Attr("extent")), NullOpt));
     } else {
-      ExprDoc max = d->AsDoc<ExprDoc>(range->min + range->extent, range_p->Attr("extent"));
-      indices.push_back(SliceDoc(min, max, NullOpt));
+      docs.push_back(LiteralDoc::None(range_p));
     }
   }
-  return indices;
+  return docs;
+}
+
+Array<Doc> BufferSlices(const Array<Range>& region, const ObjectPath& p, const IRDocsifier& d) {
+  Array<tir::ExprOrRangeOrNull> region_;
+  for (const Range& r : region) {
+    region_.push_back(tir::ExprOrRangeOrNull(r));
+  }
+  return BufferSlices(region_, p, d);
 }
 
 TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
     .set_dispatch<tir::BufferRegion>(
         "", [](tir::BufferRegion buffer_region, ObjectPath p, IRDocsifier d) -> Doc {
           ExprDoc prefix = d->AsDoc<ExprDoc>(buffer_region->buffer, p->Attr("buffer"));
-          return prefix[BufferSlices(buffer_region->region, p->Attr("region"), d)];
+          return prefix[BufferSlices(buffer_region->ConvertToIndices(), p->Attr("region"), d)];
         });
 
 TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
@@ -286,6 +298,14 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
           return AssignDoc(
               /*lhs=*/buffer[BufferIndices(store->indices, p->Attr("indices"), d)],
               /*rhs=*/value, NullOpt);
+        });
+
+TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
+    .set_dispatch<tir::BufferRegionStore>(
+        "", [](tir::BufferRegionStore store, ObjectPath p, IRDocsifier d) -> Doc {
+          ExprDoc lhs = d->AsDoc<ExprDoc>(store->region, p->Attr("region"));
+          ExprDoc rhs = d->AsDoc<ExprDoc>(store->value, p->Attr("value"));
+          return AssignDoc(lhs, rhs, NullOpt);
         });
 
 TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
@@ -358,6 +378,7 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
         });
 
 TVM_SCRIPT_REPR(tir::BufferRegionNode, ReprPrintTIR);
+TVM_SCRIPT_REPR(tir::BufferRegionStoreNode, ReprPrintTIR);
 TVM_SCRIPT_REPR(tir::BufferLoadNode, ReprPrintTIR);
 TVM_SCRIPT_REPR(tir::BufferStoreNode, ReprPrintTIR);
 TVM_SCRIPT_REPR(tir::BufferNode, ReprPrintTIR);

@@ -25,7 +25,6 @@
 #define TVM_RUNTIME_CONTAINER_ARRAY_H_
 
 #include <algorithm>
-#include <memory>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -256,13 +255,20 @@ class ArrayNode : public Object, public InplaceArrayBase<ArrayNode, ObjectRef> {
  * be dereferenced into a type that can be stored in an Array<T>, and
  * false otherwise.
  */
-template <typename T, typename IterType>
-struct is_valid_iterator
-    : std::bool_constant<std::is_base_of_v<
-          T, std::remove_cv_t<std::remove_reference_t<decltype(*std::declval<IterType>())>>>> {};
+template <typename T, typename Iter>
+inline constexpr bool iter_value_is_sub_of_t =
+    std::is_base_of_v<T,
+                      std::remove_cv_t<std::remove_reference_t<decltype(*std::declval<Iter>())>>>;
 
-template <typename T, typename IterType>
-struct is_valid_iterator<Optional<T>, IterType> : is_valid_iterator<T, IterType> {};
+// Normal case: Array<T> accepts Iter if Iter produces a T2 that is a subclass of T.
+template <typename T, typename Iter>
+struct is_valid_iterator : std::bool_constant<iter_value_is_sub_of_t<T, Iter>> {};
+
+// Special case: Array<Optional<T>> accepts Iter of T2 OR Optional<T2>.
+template <typename T, typename Iter>
+struct is_valid_iterator<Optional<T>, Iter>
+    : std::bool_constant<iter_value_is_sub_of_t<T, Iter> ||
+                         iter_value_is_sub_of_t<Optional<T>, Iter>> {};
 
 template <typename T, typename IterType>
 inline constexpr bool is_valid_iterator_v = is_valid_iterator<T, IterType>::value;

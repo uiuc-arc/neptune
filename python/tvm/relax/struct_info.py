@@ -16,24 +16,24 @@
 # under the License.
 # pylint: disable=invalid-name, unused-import
 """The struct info nodes of the Relax language."""
-from typing import List, Optional, Union
 
-import tvm._ffi
+from collections.abc import Sequence
+
 import tvm
-
-from tvm.ir import Span, EnvFunc, Array, VDevice
-from tvm.tir import PrimExpr
+import tvm._ffi
+from tvm.ir import Array, EnvFunc, Span, VDevice
 from tvm.runtime import DataType
-from .expr import StructInfo, Expr, ShapeExpr
+from tvm.tir import PrimExpr
 
-from . import _ffi_api, ty, expr
+from . import _ffi_api
+from .expr import Expr, ShapeExpr, StructInfo
 
 
 @tvm._ffi.register_object("relax.ObjectStructInfo")
 class ObjectStructInfo(StructInfo):
     """StructInfo of an Object."""
 
-    def __init__(self, span: Span = None) -> None:
+    def __init__(self, span: Span | None = None) -> None:
         self.__init_handle_by_constructor__(_ffi_api.ObjectStructInfo, span)  # type: ignore
 
 
@@ -49,14 +49,14 @@ class PrimStructInfo(StructInfo):
        value.
     """
 
-    value: Optional[PrimExpr]
+    value: PrimExpr | None
     dtype: str
 
     def __init__(
         self,
-        dtype: Optional[Union[str, DataType]] = None,
-        value: Optional[Union[int, float, PrimExpr]] = None,
-        span: Span = None,
+        dtype: str | DataType | None = None,
+        value: int | float | PrimExpr | None = None,
+        span: Span | None = None,
     ) -> None:
         # Guard against incorrect usage.  For backwards compatibility,
         # the dtype and value are in the opposite order from most
@@ -99,12 +99,16 @@ class PrimStructInfo(StructInfo):
 
         if value is None:
             self.__init_handle_by_constructor__(
-                _ffi_api.PrimStructInfoFromDtype, dtype, span
-            )  # type: ignore
+                _ffi_api.PrimStructInfoFromDtype,
+                dtype,
+                span,  # type: ignore
+            )
         else:
             self.__init_handle_by_constructor__(
-                _ffi_api.PrimStructInfoFromValue, value, span
-            )  # type: ignore
+                _ffi_api.PrimStructInfoFromValue,
+                value,
+                span,  # type: ignore
+            )
 
 
 @tvm._ffi.register_object("relax.ShapeStructInfo")
@@ -124,15 +128,21 @@ class ShapeStructInfo(StructInfo):
     Do not specify values and ndim at the same time.
     """
 
-    values: Optional[List[PrimExpr]]
+    values: list[PrimExpr] | None
     ndim: int
     span: Span
 
     def __init__(
-        self, values: Optional[List[PrimExpr]] = None, ndim: int = -1, span: Span = None
+        self,
+        values: list[PrimExpr] | None = None,
+        ndim: int = -1,
+        span: Span | None = None,
     ) -> None:
         self.__init_handle_by_constructor__(
-            _ffi_api.ShapeStructInfo, values, ndim, span  # type: ignore
+            _ffi_api.ShapeStructInfo,
+            values,
+            ndim,
+            span,  # type: ignore
         )
 
 
@@ -159,24 +169,29 @@ class TensorStructInfo(StructInfo):
     Do not specify shape and ndim at the same time.
     """
 
-    shape: Optional[Expr]
+    shape: Expr | None
     dtype: str
-    vdevice: Optional[VDevice]
+    vdevice: VDevice | None
     ndim: int
     span: Span
 
     def __init__(
         self,
-        shape: Union[Optional[Expr], List[PrimExpr]] = None,
+        shape: Expr | Sequence[int | PrimExpr] | None = None,
         dtype: str = "float32",
-        vdevice: Union[Optional[VDevice], str] = None,
+        vdevice: VDevice | str | None = None,
         ndim: int = -1,
-        span: Span = None,
+        span: Span | None = None,
     ) -> None:
         if isinstance(shape, (list, tuple, Array)):
             shape = ShapeExpr(shape)
         self.__init_handle_by_constructor__(
-            _ffi_api.TensorStructInfo, shape, dtype, ndim, vdevice, span  # type: ignore
+            _ffi_api.TensorStructInfo,
+            shape,
+            dtype,
+            ndim,
+            vdevice,
+            span,  # type: ignore
         )
 
 
@@ -190,10 +205,10 @@ class TupleStructInfo(StructInfo):
         The struct info of the fields.
     """
 
-    fields: List[StructInfo]
+    fields: list[StructInfo]
     span: Span
 
-    def __init__(self, fields: List[StructInfo], span: Span = None) -> None:
+    def __init__(self, fields: list[StructInfo], span: Span | None = None) -> None:
         self.__init_handle_by_constructor__(_ffi_api.TupleStructInfo, fields, span)  # type: ignore
 
 
@@ -216,26 +231,34 @@ class FuncStructInfo(StructInfo):
         we still consider it impure.
     """
 
-    params: Optional[List[StructInfo]]
+    params: list[StructInfo] | None
     ret: StructInfo
-    derive_func: Optional[EnvFunc]
+    derive_func: EnvFunc | None
     purity: bool
     span: Span
 
     def __init__(
-        self, params: List[StructInfo], ret: StructInfo, purity: bool = True, span: Span = None
+        self,
+        params: list[StructInfo],
+        ret: StructInfo,
+        purity: bool = True,
+        span: Span | None = None,
     ) -> None:
         self.__init_handle_by_constructor__(
-            _ffi_api.FuncStructInfo, params, ret, purity, span  # type: ignore
+            _ffi_api.FuncStructInfo,
+            params,
+            ret,
+            purity,
+            span,  # type: ignore
         )
 
     @staticmethod
     def opaque_func(
         *,
-        ret: Optional[StructInfo] = None,
-        derive_func: Optional[Union[str, EnvFunc]] = None,
+        ret: StructInfo | None = None,
+        derive_func: str | EnvFunc | None = None,
         purity: bool = False,
-        span: Span = None,
+        span: Span | None = None,
     ) -> "FuncStructInfo":
         """
         Create an opaque FuncStructInfo.

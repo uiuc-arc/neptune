@@ -96,6 +96,9 @@ class OpaqueBlockLower : public StmtExprMutator {
     std::vector<std::pair<std::string, PrimExpr>> pragma_attrs;
     Map<String, ObjectRef> new_annotations =
         HandleAnnotations(op->annotations, &pragma_attrs, /*is_block=*/false);
+    for (auto it = pragma_attrs.rbegin(); it != pragma_attrs.rend(); ++it) {
+      body = AttrStmt(op->loop_var, it->first, it->second, std::move(body));
+    }
     // Step 4. Create new For loop accordingly
     if (op->kind == ForKind::kThreadBinding) {
       // Case 1. Thread binding
@@ -109,10 +112,6 @@ class OpaqueBlockLower : public StmtExprMutator {
       // Case 3. An ordinary loop
       body = For(op->loop_var, std::move(min), std::move(extent), op->kind, std::move(body),
                  NullOpt, new_annotations);
-    }
-    // Step 5. Insert nested attrs
-    for (auto it = pragma_attrs.rbegin(); it != pragma_attrs.rend(); ++it) {
-      body = AttrStmt(op->loop_var, it->first, it->second, std::move(body));
     }
     return body;
   }

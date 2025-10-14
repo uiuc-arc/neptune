@@ -149,7 +149,9 @@ class ConcreteScheduleNode : public ScheduleNode {
   void ComputeInline(const BlockRV& block) override;
   void ReverseComputeInline(const BlockRV& block) override;
   /******** Schedule: Reduction ********/
-  BlockRV RFactor(const LoopRV& loop_rv, int factor_axis) override;
+  BlockRV RFactor(const LoopRV& loop_rv, int factor_axis, bool merge_loops = false) override;
+  BlockRV RollingUpdate(const BlockRV& block_rv, const LoopRV& loop_rv, int factor_axis) override;
+  BlockRV SplitKUpdate(const BlockRV& block_rv, const LoopRV& loop_rv, int factor_axis) override;
   BlockRV DecomposeReduction(const BlockRV& block_rv, const LoopRV& loop_rv) override;
   void PadEinsum(const BlockRV& block_rv, const Array<Integer>& padding) override;
   /******** Schedule: Block annotation ********/
@@ -179,10 +181,17 @@ class ConcreteScheduleNode : public ScheduleNode {
   BlockRV DecomposePadding(const BlockRV& block_rv, const LoopRV& loop_rv) override;
   /******** Schedule: Buffer transformation ********/
   void RollingBuffer(const BlockRV& block_rv, int write_buffer_index) override;
+  Array<BlockRV> SplitScanBuffer(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                 int write_buffer_index) override;
   /******** Schedule: Misc ********/
   void EnterPostproc() override {}
+  void PropagateIfThenElse(const BlockRV& block_rv, const LoopRV& loop_rv,
+                           String registered_handler) override;
   void UnsafeHideBufferAccess(const BlockRV& block_rv, const String& buf_type,
                               const Array<IntImm>& buf_index_array) override;
+  /******** Schedule: Function passes (buffer compactification, loop-tile conversion) ********/
+  void CompactBuffer() override;
+  void ToTileExprForm(const Array<LoopRV>& blockize_hints) override;
 
  protected:
   /******** Utility functions ********/

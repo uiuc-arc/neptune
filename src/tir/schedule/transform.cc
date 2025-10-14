@@ -17,6 +17,8 @@
  * under the License.
  */
 
+#include <tvm/arith/pattern.h>
+
 #include "../transforms/ir_utils.h"
 #include "./utils.h"
 
@@ -52,6 +54,24 @@ Buffer WithDType(const Buffer& buffer, const DataType& dtype) {
       Var(buffer->data->name_hint, PointerType(PrimType(dtype), ptr_type->storage_scope));
   new_buffer->name = buffer->name;
   return Buffer(new_buffer);
+}
+
+Array<Buffer> CreateExpandedBuffers(const Array<BufferStore>& buf_stores, int factor_axis,
+                                    const PrimExpr& extent, const std::string& suffix) {
+  Array<Buffer> rf_buffers;
+  rf_buffers.reserve(buf_stores.size());
+  for (const BufferStore& buf_store : buf_stores) {
+    Buffer buffer = buf_store->buffer;
+    Array<PrimExpr> rf_shape = buffer->shape;
+    rf_shape.insert(rf_shape.begin() + factor_axis, extent);
+
+    ObjectPtr<BufferNode> n = make_object<BufferNode>(*buffer.get());
+    n->shape = rf_shape;
+    n->name = buffer->name + suffix;
+    n->data = buffer->data.copy_with_suffix(suffix);
+    rf_buffers.push_back(Buffer(n));
+  }
+  return rf_buffers;
 }
 
 Array<BufferRegion> ReplaceBuffer(Array<BufferRegion> regions, const Buffer& source,
@@ -227,6 +247,119 @@ Stmt ReplaceBufferMutator::VisitStmt_(const BlockNode* block) {
       block_sref_reuse_->Set(GetRef<Block>(block), new_block);
     }
     return std::move(new_block);
+  }
+}
+
+/******** Replace BufferLoad ********/
+class BufferLoadSubst : public StmtExprMutator {
+ public:
+  BufferLoadSubst(std::function<PrimExpr(const BufferLoadNode*)> subst)
+      : subst_(std::move(subst)) {}
+
+ private:
+  PrimExpr VisitExpr_(const BufferLoadNode* op) final { return subst_(op); }
+
+  Stmt VisitStmt_(const BlockNode* op) final {
+    auto block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
+    if (block.get() == op) {
+      return block;
+    }
+    auto* n = block.CopyOnWrite();
+    std::tie(n->reads, n->writes) = GetBlockReadWriteRegion(block);
+    return std::move(block);
+  }
+
+  std::function<PrimExpr(const BufferLoadNode*)> subst_;
+};
+
+PrimExpr ReplaceBufferLoads(PrimExpr expr, std::function<PrimExpr(const BufferLoadNode*)> subst) {
+  return BufferLoadSubst(std::move(subst))(expr);
+}
+
+Stmt ReplaceBufferLoads(Stmt stmt, std::function<PrimExpr(const BufferLoadNode*)> subst) {
+  return BufferLoadSubst(std::move(subst))(stmt);
+}
+
+/******** IterVar-related Mutations ********/
+
+using BRMutator = std::function<BlockRealize(BlockRealize)>;
+void MutateAndReplaceBlockRealize(ScheduleState& self, const StmtSRef& block_sref,
+                                  BRMutator mutator) {
+  struct Mutator : public StmtExprMutator {
+    Mutator(Block target_block, BRMutator mutator)
+        : target_block_(std::move(target_block)), mutator_(std::move(mutator)) {}
+
+    Stmt VisitStmt_(const BlockRealizeNode* op) final {
+      if (op->block.same_as(target_block_)) {
+        auto new_br = mutator_(GetRef<BlockRealize>(op));
+        block_sref_reuse_.Set(op->block, new_br->block);
+        return new_br;
+      } else {
+        return StmtExprMutator::VisitStmt_(op);
+      }
+    }
+
+    Block target_block_;
+    BRMutator mutator_;
+    Map<Block, Block> block_sref_reuse_;
+  };
+
+  auto parent_sref = block_sref->parent;
+  ICHECK(parent_sref != nullptr)
+      << "StmtSRef " << block_sref
+      << " does not have a parent (it is the root block), which is not supported";
+  Mutator stmt_mutator(GetRef<Block>(TVM_SREF_TO_BLOCK(block_sref)), std::move(mutator));
+  auto new_parent_stmt = stmt_mutator(GetRef<Stmt>(parent_sref->stmt));
+  self->Replace(GetRef<StmtSRef>(parent_sref), new_parent_stmt, stmt_mutator.block_sref_reuse_);
+}
+
+std::pair<BlockRealize, IterVar> SplitVarFromIterVars(BlockRealize br, Var var, Range range) {
+  // Find the index of the IterVar whose mapped expression contains `var`.
+  std::vector<size_t> indices;
+  for (size_t i = 0; i < br->iter_values.size(); ++i) {
+    auto expr = br->iter_values[i];
+    if (UsesVar(expr, [&](const VarNode* var_node) { return var_node == var.get(); })) {
+      indices.push_back(i);
+    }
+  }
+  ICHECK(indices.size() <= 1) << "Multiple IterVars use the same loop variable " << var
+                              << " in block " << br;
+  if (indices.empty()) {
+    // Case 1. Create a new IterVar that maps to `var`.
+    auto new_iter_values = br->iter_values;
+    auto new_iv_var = var.copy_with_name("v_" + var->name_hint);
+    auto new_iv = IterVar(range, new_iv_var, IterVarType::kDataPar, "");
+    new_iter_values.push_back(var);
+    auto new_block = br->block;
+    new_block.CopyOnWrite()->iter_vars.push_back(new_iv);
+    return {BlockRealize(new_iter_values, br->predicate, new_block), new_iv};
+  } else if (br->iter_values[indices[0]].same_as(var)) {
+    // Case 2. Do nothing.
+    return {br, br->block->iter_vars[indices[0]]};
+  } else {
+    // Case 3. Found an IterVar that maps to `var`. Split it.
+    size_t iv_index = indices[0];
+    auto linear_terms = arith::DetectLinearEquation(br->iter_values[iv_index], {var});
+    ICHECK(!linear_terms.empty());
+    PrimExpr coef = linear_terms[0], other_terms = linear_terms[1];
+    IterVar iv = br->block->iter_vars[iv_index];
+    IterVar iv0(range, iv->var.copy_with_suffix("_0"), iv->iter_type, iv->thread_tag);
+    PrimExpr expr0 = var;
+    IterVar iv1(Range::FromExtent(coef), iv->var.copy_with_suffix("_1"), iv->iter_type,
+                iv->thread_tag);
+    PrimExpr expr1 = other_terms;
+    // Substitute away all uses of the old IterVar. We use Substitute because it will also take
+    // care of uses in block->{reads|writes|...}.
+    auto new_block = Downcast<Block>(Substitute(br->block, {{iv->var, iv0 * coef + iv1}}));
+    // Write IterVar changes back to the block and the block realize.
+    auto new_ivars = new_block->iter_vars;
+    auto new_it_values = br->iter_values;
+    new_ivars.Set(iv_index, iv0);
+    new_it_values.Set(iv_index, expr0);
+    new_ivars.insert(new_ivars.begin() + iv_index + 1, iv1);
+    new_it_values.insert(new_it_values.begin() + iv_index + 1, expr1);
+    new_block.CopyOnWrite()->iter_vars = new_ivars;
+    return {BlockRealize(new_it_values, br->predicate, new_block), iv0};
   }
 }
 

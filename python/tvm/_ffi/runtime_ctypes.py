@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Common runtime ctypes."""
+
 # pylint: disable=invalid-name
 import ctypes
 import json
@@ -226,6 +227,27 @@ class DataType(ctypes.Structure):
         if lanes_as_int < 0:
             raise ValueError("Cannot determine itemsize for scalable vector types")
         return (self.bits * self.lanes + 7) // 8
+
+    @classmethod
+    def from_torch_dtype(cls, torch_dtype, torch):
+        # Only lists dtypes whose string repr differs from TVM's
+        # The rest can be handled by `str(dtype).removeprefix("torch.")`
+        TORCH2STR = {
+            torch.float8_e4m3fn: "e4m3_float8",
+            torch.float8_e5m2: "e5m2_float8",
+        }
+        default = str(torch_dtype).removeprefix("torch.")
+        return TORCH2STR.get(torch_dtype, default)
+
+    @classmethod
+    def to_torch_dtype(cls, dtype: str, torch):
+        STR2TORCH = {
+            "e4m3_float8": torch.float8_e4m3fn,
+            "e5m2_float8": torch.float8_e5m2,
+        }
+        if (torch_dtype := STR2TORCH.get(dtype)) is not None:
+            return torch_dtype
+        return getattr(torch, dtype)
 
 
 if ml_dtypes is not None:

@@ -27,6 +27,7 @@ For example, you can use addexp.a to get the left operand of an Add node.
   assert(isinstance(y, tvm.tir.Add))
   assert(y.a == x)
 """
+
 from typing import List, Optional, Union
 
 import tvm._ffi
@@ -56,17 +57,13 @@ def div_ambiguity_error() -> RuntimeError:
 def _dtype_is_int(value):
     if isinstance(value, int):
         return True
-    return (
-        isinstance(value, ExprOp) and DataType(value.dtype).type_code == DataTypeCode.INT
-    )  # type: ignore
+    return isinstance(value, ExprOp) and DataType(value.dtype).type_code == DataTypeCode.INT  # type: ignore
 
 
 def _dtype_is_float(value):
     if isinstance(value, float):
         return True
-    return (
-        isinstance(value, ExprOp) and DataType(value.dtype).type_code == DataTypeCode.FLOAT
-    )  # type: ignore
+    return isinstance(value, ExprOp) and DataType(value.dtype).type_code == DataTypeCode.FLOAT  # type: ignore
 
 
 class ExprOp(object):
@@ -459,12 +456,10 @@ class IterVar(Object, ExprOp, Scriptable):
         dtype = "int32" if dom is None else dom.extent.dtype
         var = Var(name, dtype=dtype, span=span) if not isinstance(var, Var) else var
         if dom is not None:
-            assert (
-                var.dtype == dom.extent.dtype
-            ), "IterVar's Var dtype must match its domain's extent's dtype"
-        self.__init_handle_by_constructor__(
-            _ffi_api.IterVar, dom, var, iter_type, thread_tag, span  # type: ignore
-        )
+            assert var.dtype == dom.extent.dtype, (
+                "IterVar's Var dtype must match its domain's extent's dtype"
+            )
+        self.__init_handle_by_constructor__(_ffi_api.IterVar, dom, var, iter_type, thread_tag, span)  # type: ignore
 
 
 @tvm._ffi.register_object("tir.CommReducer")
@@ -503,7 +498,12 @@ class CommReducer(Object, Scriptable):
         span: Optional[Span] = None,
     ) -> None:
         self.__init_handle_by_constructor__(
-            _ffi_api.CommReducer, lhs, rhs, result, identity_element, span  # type: ignore
+            _ffi_api.CommReducer,  # type: ignore
+            lhs,
+            rhs,
+            result,
+            identity_element,
+            span,
         )
 
 
@@ -554,7 +554,14 @@ class Reduce(PrimExprWithOp):
     ) -> None:
         init = [] if init is None else init
         self.__init_handle_by_constructor__(
-            _ffi_api.Reduce, combiner, src, rdom, condition, value_index, init, span  # type: ignore
+            _ffi_api.Reduce,  # type: ignore
+            combiner,
+            src,
+            rdom,
+            condition,
+            value_index,
+            init,
+            span,
         )
 
 
@@ -577,9 +584,7 @@ class FloatImm(ConstExpr):
     value: float
 
     def __init__(self, dtype: str, value: float, span: Optional[Span] = None) -> None:
-        self.__init_handle_by_constructor__(
-            tvm.ir._ffi_api.FloatImm, dtype, value, span  # type: ignore
-        )
+        self.__init_handle_by_constructor__(tvm.ir._ffi_api.FloatImm, dtype, value, span)  # type: ignore
 
     def __float__(self) -> float:
         return self.value
@@ -604,9 +609,7 @@ class IntImm(ConstExpr):
     value: int
 
     def __init__(self, dtype: str, value: int, span: Optional[Span] = None) -> None:
-        self.__init_handle_by_constructor__(
-            tvm.ir._ffi_api.IntImm, dtype, value, span  # type: ignore
-        )
+        self.__init_handle_by_constructor__(tvm.ir._ffi_api.IntImm, dtype, value, span)  # type: ignore
 
     def __hash__(self) -> int:
         return self.value
@@ -1083,7 +1086,11 @@ class Select(PrimExprWithOp):
         if isinstance(condition, bool):
             condition = IntImm("bool", condition)
         self.__init_handle_by_constructor__(
-            _ffi_api.Select, condition, true_value, false_value, span  # type: ignore
+            _ffi_api.Select,  # type: ignore
+            condition,
+            true_value,
+            false_value,
+            span,
         )
 
 
@@ -1117,9 +1124,39 @@ class BufferLoad(PrimExprWithOp):
         predicate: Optional[PrimExpr] = None,
         span: Optional[Span] = None,
     ) -> None:
+        self.__init_handle_by_constructor__(_ffi_api.BufferLoad, buffer, indices, predicate, span)  # type: ignore
+
+
+@tvm._ffi.register_object("tir.BufferRegion")
+class BufferRegion(PrimExprWithOp):
+    """BufferRegion node.
+
+    Parameters
+    ----------
+    buffer : Buffer
+        The buffer of the buffer region
+
+    region : List[Range]
+        The region array of the buffer region
+
+    output_to_input_dims : List[Optional[int]]
+        A mapping from output dimensions (the dimensions of the region) to input dimensions
+        (the dimensions of the buffer).
+    """
+
+    buffer: Buffer
+    region: list[ir.Range]
+    output_to_input_dims: list[int | None]
+
+    def __init__(
+        self,
+        buffer: Buffer,
+        region: list[ir.Range],
+        output_to_input_dims: list[int | None] | None = None,
+    ) -> None:
         self.__init_handle_by_constructor__(
-            _ffi_api.BufferLoad, buffer, indices, predicate, span  # type: ignore
-        )
+            _ffi_api.BufferRegion, buffer, region, output_to_input_dims
+        )  # type: ignore
 
 
 @tvm._ffi.register_object("tir.ProducerLoad")
@@ -1144,9 +1181,7 @@ class ProducerLoad(PrimExprWithOp):
     def __init__(
         self, producer: DataProducer, indices: List[PrimExpr], span: Optional[Span] = None
     ) -> None:
-        self.__init_handle_by_constructor__(
-            _ffi_api.ProducerLoad, producer, indices, span  # type: ignore
-        )
+        self.__init_handle_by_constructor__(_ffi_api.ProducerLoad, producer, indices, span)  # type: ignore
 
 
 @tvm._ffi.register_object("tir.Ramp")
@@ -1175,9 +1210,7 @@ class Ramp(PrimExprWithOp):
     def __init__(
         self, base: PrimExpr, stride: PrimExpr, lanes: PrimExpr, span: Optional[Span] = None
     ) -> None:
-        self.__init_handle_by_constructor__(
-            _ffi_api.Ramp, base, stride, lanes, span  # type: ignore
-        )
+        self.__init_handle_by_constructor__(_ffi_api.Ramp, base, stride, lanes, span)  # type: ignore
 
 
 @tvm._ffi.register_object("tir.Broadcast")
@@ -1225,9 +1258,7 @@ class Shuffle(PrimExprWithOp):
     def __init__(
         self, vectors: List[PrimExpr], indices: List[PrimExpr], span: Optional[Span] = None
     ) -> None:
-        self.__init_handle_by_constructor__(
-            _ffi_api.Shuffle, vectors, indices, span  # type: ignore
-        )
+        self.__init_handle_by_constructor__(_ffi_api.Shuffle, vectors, indices, span)  # type: ignore
 
 
 class CallEffectKind:

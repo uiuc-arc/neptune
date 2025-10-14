@@ -478,6 +478,8 @@ inline void PythonAPICall::AsPythonString(const ObjectRef& obj, std::ostream& os
       os << '\"' << kv.first << "\": " << kv.second;
     }
     os << '}';
+  } else if (obj->IsInstance<PrimExprNode>()) {
+    os << obj;
   } else {
     LOG(FATAL) << "ValueError: Cannot translate type '" << obj->GetTypeKey()
                << "' to python. Its value is: " << obj;

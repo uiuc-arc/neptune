@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Common expressions data structures in the IR."""
+
 from numbers import Number
 from typing import Callable, Optional
 
@@ -182,7 +183,10 @@ class Range(Node, Scriptable):
     span: Optional[Span]
 
     def __init__(
-        self, begin: PrimExpr, end: Optional[PrimExpr] = None, span: Optional[Span] = None
+        self,
+        begin: PrimExpr | int,
+        end: Optional[PrimExpr | int] = None,
+        span: Optional[Span] = None,
     ) -> None:
         self.__init_handle_by_constructor__(_ffi_api.Range, begin, end, span)
 

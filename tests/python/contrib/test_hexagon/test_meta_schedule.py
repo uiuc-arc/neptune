@@ -15,7 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
-""" Test rpc based launcher for hexagon """
+"""Test rpc based launcher for hexagon"""
+
 import tempfile
 
 import numpy as np
@@ -218,7 +219,6 @@ def test_vrmpy_dense(hexagon_launcher):
                 max_trials_global=8,
                 space=ms.space_generator.ScheduleFn(
                     schedule_dense_for_tune,
-                    sch_rules=[],
                     postprocs=[],
                     mutator_probs={},
                 ),
@@ -290,9 +290,7 @@ class ModuleVRMPYAutoTensorize:
                     )
                     a_u8x4: T.uint8x4 = a_buffer[0:4]  # type: ignore
                     a_i32: T.int32 = T.reinterpret(a_u8x4, dtype="int32")  # type: ignore
-                    b_i32x32: T.int32x32 = T.reinterpret(
-                        b_buffer[0, 0:128], dtype="int32x32"
-                    )  # type: ignore
+                    b_i32x32: T.int32x32 = T.reinterpret(b_buffer[0, 0:128], dtype="int32x32")  # type: ignore
                     c_buffer[0:32] = T.call_llvm_pure_intrin(  # type: ignore
                         4390, T.uint32(3), c_buffer[0:32], b_i32x32, a_i32, dtype="int32x32"
                     )

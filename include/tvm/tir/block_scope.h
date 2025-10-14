@@ -307,6 +307,26 @@ class BlockScope : public ObjectRef {
   TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(BlockScope, ObjectRef, BlockScopeNode);
 };
 
+/******** Misc helper functions for SRef statements ********/
+
+/*!
+ * \brief Get the statement that the sref points to as a variant of Block or For
+ * \param sref The sref
+ * \return The statement variant
+ */
+Variant<Block, For> GetSRefStmtAsVariant(const StmtSRef& sref);
+
+template <typename Func1, typename Func2>
+auto VisitSRefStmtVariant(const Variant<Block, For>& v, Func1&& block_f, Func2&& loop_f) {
+  if (auto block = v.as<BlockNode>()) {
+    return block_f(GetRef<Block>(block));
+  } else if (auto loop = v.as<ForNode>()) {
+    return loop_f(GetRef<For>(loop));
+  } else {
+    LOG_FATAL << "Unreachable";
+  }
+}
+
 }  // namespace tir
 }  // namespace tvm
 

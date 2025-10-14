@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Post Order Apply Space Generator."""
+
 from tvm._ffi import register_object
 
 from .. import _ffi_api
@@ -50,11 +51,22 @@ class PostOrderApply(SpaceGenerator):
         mutator_probs: MutatorProbType = "from-target",
     ):
         """Constructor"""
-        sch_rules, postprocs, mutator_probs = _normalize_rules(sch_rules, postprocs, mutator_probs)
+        from ..schedule_rule import ScheduleRule
+
+        postprocs_, mutator_probs_ = _normalize_rules(postprocs, mutator_probs)
+
+        def create_or_none(arg):
+            if not isinstance(arg, str):
+                return arg
+            if arg == "from-target":
+                return None
+            return ScheduleRule.create(arg)
+
+        sch_rules_ = create_or_none(sch_rules)
         self.__init_handle_by_constructor__(
             _ffi_api.SpaceGeneratorPostOrderApply,  # type: ignore # pylint: disable=no-member
             f_block_filter,
-            sch_rules,
-            postprocs,
-            mutator_probs,
+            sch_rules_,
+            postprocs_,
+            mutator_probs_,
         )

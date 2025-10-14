@@ -16,13 +16,14 @@
 # under the License.
 # pylint: disable=invalid-name,unused-argument
 """Common pass infrastructure across IR variants."""
-import inspect
 import functools
+import inspect
 
 import tvm._ffi
 import tvm.runtime
 
 from . import _ffi_transform_api
+from .module import IRModule
 
 
 @tvm._ffi.register_object("transform.PassInfo")
@@ -221,7 +222,7 @@ class Pass(tvm.runtime.Object):
         """Get the pass meta."""
         return _ffi_transform_api.Info(self)
 
-    def __call__(self, mod):
+    def __call__(self, mod: IRModule) -> IRModule:
         """Execute the pass. Note that for sequential pass, the dependency among
         different passes will be resolved in the backend.
 

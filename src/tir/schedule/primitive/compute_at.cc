@@ -17,6 +17,7 @@
  * under the License.
  */
 #include "../utils.h"
+#include "tvm/tir/schedule/state.h"
 
 namespace tvm {
 namespace tir {
@@ -118,6 +119,27 @@ class NotInSameScopeError : public ScheduleError {
   For loop_;
 };
 
+class ProducerNotCompleteError : public ScheduleError {
+ public:
+  String FastErrorString() const final {
+    return "ScheduleError: Producer of the block is a reduction block that "
+           "does not produce "
+           "complete elements";
+  }
+  String DetailRenderTemplate() const final {
+    return "ScheduleError: Producer {0} is a reduction block that does not "
+           "produce complete elements";
+  }
+  IRModule mod() const final { return mod_; }
+  Array<ObjectRef> LocationsOfInterest() const final { return {producer_blk}; }
+
+  ProducerNotCompleteError(IRModule mod, const Block& producer_blk)
+      : mod_(mod), producer_blk(producer_blk) {}
+
+  IRModule mod_;
+  Block producer_blk;
+};
+
 /******** Helper Functions/Classes ********/
 
 /*!
@@ -138,12 +160,12 @@ class NotInSameScopeError : public ScheduleError {
  * \throws ScheduleError if there is no such insertion point found
  */
 template <bool require_all_producers_visited, bool require_all_consumers_visited>
-int FindInsertionPoint(const ScheduleState& self, const Array<Stmt>& subtrees,
+int FindInsertionPoint(const ScheduleState& self, const Stmt& root, const Stmt& loop_body,
                        const Array<StmtSRef>& producer_srefs, const Array<StmtSRef>& consumer_srefs,
                        std::unordered_map<const BlockNode*, const BlockRealizeNode*>* block2realize,
                        int index) {
-  ProducerConsumerSplit split =
-      ProducerConsumerSplit::Find(self, subtrees, producer_srefs, consumer_srefs, block2realize);
+  ProducerConsumerSplit split = ProducerConsumerSplit::Find(self, root, loop_body, producer_srefs,
+                                                            consumer_srefs, block2realize);
   // Step 1. Check if all the producers are visited in the subtrees, if required to
   if (require_all_producers_visited) {
     int num_producers = producer_srefs.size();
@@ -184,17 +206,37 @@ int FindInsertionPoint(const ScheduleState& self, const Array<Stmt>& subtrees,
 /*!
  * \brief Represent the iteration domain to fully cover the required region of Intersect(dom, bound)
  * The bound region may not get directly intersected with dom region, instead we try to generate
- * extra predicates for non-trivial bound. The domain info class can also union with each other.
+ * extra predicates for non-trivial bound. The domain info class can also join with each other.
  */
 struct BlockVarDomainInfo {
-  arith::IntSet dom{arith::IntSet::Nothing()};  // dom is ensured to be bounded
-  arith::IntSet bound{arith::IntSet::Nothing()};
+  arith::IntSet dom;
+  arith::IntSet bound;
 
-  /*! \brief Relaxed union operation */
-  void Union(const BlockVarDomainInfo& other) {
-    // just relax (d0 ^ b0) v (d1 ^ b1) to (d0 v d1) ^ (b0 v b1)
-    dom = arith::Union({dom, other.dom});
-    bound = arith::Union({bound, other.bound});
+  BlockVarDomainInfo() = default;
+
+  BlockVarDomainInfo(arith::IntSet dom, arith::IntSet bound)
+      : dom(std::move(dom)), bound(std::move(bound)) {}
+
+  BlockVarDomainInfo(bool is_nothing) {
+    if (is_nothing) {
+      dom = arith::IntSet::Nothing();
+      bound = arith::IntSet::Nothing();
+    } else {
+      dom = arith::IntSet::Everything();
+      bound = arith::IntSet::Everything();
+    }
+  }
+
+  /*! \brief Relaxed union or intersect operation */
+  void Join(const BlockVarDomainInfo& other, bool is_compute_at) {
+    if (is_compute_at) {
+      // just relax (d0 ^ b0) v (d1 ^ b1) to (d0 v d1) ^ (b0 v b1)
+      dom = arith::Union({dom, other.dom});
+      bound = arith::Union({bound, other.bound});
+    } else {
+      dom = arith::Intersect({dom, other.dom});
+      bound = arith::Intersect({bound, other.bound});
+    }
   }
 
   /*! \brief Simplify domain info */
@@ -232,16 +274,16 @@ struct BlockVarDomainInfo {
   }
 };
 
-/*!
- * \brief A helper to reconstruct the block scope where the given block is moved under the given
- * loop, and the given block's induced loop nest is regenerated to satisfy the required region.
- */
 class ScopeReconstructor : private StmtMutator {
  public:
-  explicit ScopeReconstructor(Block scope_root, Block block, For loop)
-      : scope_root_(scope_root), block_(block), loop_(loop) {}
-
-  using StmtMutator::operator();
+  static ScopeReconstructor CreateWithRemovalPlan(const ScheduleState& self, Block scope_root,
+                                                  StmtSRef block_sref, Variant<Block, For> target) {
+    Stmt rm_src_stmt, rm_tgt_stmt;
+    LeafBlockRemovalPlan(self, block_sref, &rm_src_stmt, &rm_tgt_stmt);
+    auto block = GetRef<Block>(TVM_SREF_TO_BLOCK(block_sref));
+    return ScopeReconstructor(std::move(scope_root), std::move(block), std::move(target),
+                              std::move(rm_src_stmt), std::move(rm_tgt_stmt));
+  }
 
   /*!
    * \brief Create the loop nest on top of the block, induced by the given block var's domain
@@ -302,84 +344,127 @@ class ScopeReconstructor : private StmtMutator {
                         /*ForKind=*/ForKind::kSerial,
                         /*body=*/std::move(new_subtree));
     }
-    Array<Stmt> subtrees = AsArray(loop_->body);
+    auto GetBody = [](auto&& block) { return block->body; };
+    auto target_body = tir::VisitSRefStmtVariant(target_, GetBody, GetBody);
+    Array<Stmt> subtrees = AsArray(target_body);
     subtrees.insert(subtrees.begin() + insert_position, std::move(new_subtree));
-    ObjectPtr<ForNode> new_loop = make_object<ForNode>(*loop_.get());
-    new_loop->body = SeqStmt(std::move(subtrees));
-    this->new_loop_ = For(std::move(new_loop));
+    auto new_body = SeqStmt(std::move(subtrees));
+    this->new_target_ = tir::VisitSRefStmtVariant(
+        target_,
+        [new_body](const Block& block) -> Stmt {
+          auto new_stmt = make_object<BlockNode>(*block.get());
+          new_stmt->body = std::move(new_body);
+          return Stmt(std::move(new_stmt));
+        },
+        [new_body](const For& loop) -> Stmt {
+          auto new_stmt = make_object<ForNode>(*loop.get());
+          new_stmt->body = std::move(new_body);
+          return Stmt(std::move(new_stmt));
+        });
   }
+
+  using StmtMutator::operator();
 
  private:
-  Stmt VisitStmt_(const BlockNode* block) final {
-    if (block != scope_root_.get()) {
-      return GetRef<Block>(block);
-    }
-    if (block == rm_src_stmt_.get()) {
-      block = TVM_TYPE_AS(rm_tgt_stmt_, BlockNode);
-    }
-    return StmtMutator::VisitStmt_(block);
+  explicit ScopeReconstructor(Block scope_root, Block block, Variant<Block, For> target,
+                              Stmt rm_src_stmt, Stmt rm_tgt_stmt)
+      : scope_root_(std::move(scope_root)),
+        block_(std::move(block)),
+        target_(std::move(target)),
+        rm_src_stmt_(std::move(rm_src_stmt)),
+        rm_tgt_stmt_(std::move(rm_tgt_stmt)) {
+    ICHECK(!rm_src_stmt_.same_as(target_)) << "The removal target (where the block is erased from) "
+                                              "cannot be the same as the target stmt where "
+                                              "the block is moved to";
   }
 
-  Stmt VisitStmt_(const ForNode* loop) final {
-    if (loop == rm_src_stmt_.get()) {
-      loop = TVM_TYPE_AS(rm_tgt_stmt_, ForNode);
+  Stmt VisitStmt(const Stmt& stmt) final {
+    auto new_stmt = stmt;
+    if (new_stmt.same_as(target_)) {
+      // 1. Replace the compute-at target with the new target, which will create the new version of
+      // `block_`.
+      new_stmt = new_target_;
+    } else if (new_stmt.same_as(rm_src_stmt_)) {
+      // 2. Try and apply the removal plan to remove `block_` from its old position. This case
+      // cannot overlap with 1 because we checked that `target_` is never the same as
+      // `rm_src_stmt_`.
+      new_stmt = rm_tgt_stmt_;
     }
-    if (loop == loop_.get()) {
-      return new_loop_;
-    }
-    return StmtMutator::VisitStmt_(loop);
+    return StmtMutator::VisitStmt(new_stmt);
   }
+
+  /*! \brief The root block of the block scope. */
+  Block scope_root_;
+  /*! \brief The block to operate on. Equivalent to the block argument of compute-at. */
+  Block block_;
+  /*! \brief The stmt to put `block_` under. Equivalent to the loop argument of compute-at. */
+  Variant<Block, For> target_;
+  /*! \brief A removal plan. By replacing `rm_src_stmt_` with `rm_tgt_stmt_`, we can remove the
+   * given block from its old position. */
+  Stmt rm_src_stmt_, rm_tgt_stmt_;
+  /*! \brief The new loop to replace the original loop */
+  Stmt new_target_{nullptr};
 
  public:
-  /*! \brief The root block of the block scope */
-  Block scope_root_;
-  /*! \brief The given block to be moved */
-  Block block_;
-  /*! \brief The given loop the block and its loop nest to be put under */
-  For loop_;
-  /*! \brief The new loop to replace the original loop */
-  For new_loop_{nullptr};
   /*! \brief The new block realize to the moved block */
   BlockRealize new_block_realize_{nullptr};
-  /*! \brief The plan to remove the given block by replacing this loop/block in the AST */
-  Stmt rm_src_stmt_{nullptr};
-  /*! \brief The plan to remove the given block by replacing to this loop/block in the AST */
-  Stmt rm_tgt_stmt_{nullptr};
 };
 
+using BufferRegionsT = std::unordered_map<const BufferNode*, std::vector<NDIntSet>>;
 /*!
  * \brief Calculate a list of accessed buffer regions under a path of loops
  * \tparam relax_storage_scope Whether to relax beyond the path according to the storage and
  * execution scope
  * \param binding The block binding, used to unbind the buffer regions
+ * \param block_sref The block sref to be analyzed.
  * \param buffer_regions The buffer regions to be calculated
- * \param relax_path_low_inclusive The lowest point in the loop path, inclusive
  * \param relax_path_high_exclusive The highest point in the loop path, exclusive
+ * \param check_reduce_completeness If false, skip domain completeness check for reduction
+ * iter-vars. Has no effect when `is_compute_at` is True.
  * \param relaxed Where the calculation result is stored
  */
-template <bool relax_storage_scope>
-void RelaxBufferRegions(const Map<Var, PrimExpr>& binding,
-                        const Array<BufferRegion>& buffer_regions,
-                        const StmtSRef& relax_path_low_inclusive,
-                        const StmtSRef& relax_path_high_exclusive,
-                        std::unordered_map<const BufferNode*, std::vector<NDIntSet>>* relaxed) {
+template <bool is_compute_at>
+void RelaxBufferRegions(const ScheduleState& self, const StmtSRef& block_sref,
+                        const BlockRealize& block_realize,
+                        const StmtSRef& relax_path_high_exclusive, bool check_reduce_completeness,
+                        arith::Analyzer& analyzer, BufferRegionsT& relaxed) {
+  Block block = block_realize->block;
+  Map<Var, PrimExpr> binding = GetBindings(block_realize);
+  auto relax_path_low_inclusive = GetRef<StmtSRef>(block_sref->parent);
   runtime::StorageScope global_scope{runtime::StorageRank::kGlobal, ""};
   // We cache the variable domains
   runtime::StorageRank previous_rank = runtime::StorageRank::kGlobal;
   Optional<Map<Var, arith::IntSet>> var_dom = NullOpt;
+  // In reverse_compute_at mode, prepare to check reduction completeness
+  auto IsReductionComplete = [&](const Map<Var, arith::IntSet>& var_dom) {
+    for (size_t i = 0; i < block->iter_vars.size(); ++i) {
+      auto iter_var = block->iter_vars[i];
+      if (iter_var->iter_type != kCommReduce) {
+        continue;
+      }
+      // IntSet is inclusive on both sides [a, b] while Range is [a, b)
+      arith::IntSet iv_relaxed_dom = arith::EvalSet(block_realize->iter_values[i], var_dom);
+      Range iv_dom = iter_var->dom;
+      if (!analyzer.CanProve(iv_relaxed_dom.min() == iv_dom->min) ||
+          !analyzer.CanProve(iv_relaxed_dom.max() + 1 == iv_dom->extent)) {
+        return false;
+      }
+    }
+    return true;
+  };
   // Enumerate every buffer region
-  for (const BufferRegion& buffer_region : buffer_regions) {
+  for (const BufferRegion& buffer_region : is_compute_at ? block->reads : block->writes) {
     const Buffer& buffer = buffer_region->buffer;
     const Array<Range>& region = buffer_region->region;
     // Skip the buffer regions we are not interested in
-    auto it = relaxed->find(buffer.get());
-    if (it == relaxed->end()) {
+    auto it = relaxed.find(buffer.get());
+    if (it == relaxed.end()) {
       continue;
     }
     std::vector<NDIntSet>& relaxed_regions = it->second;
     // Check and update the cached `var_dom`
     runtime::StorageScope scope =
-        relax_storage_scope ? runtime::StorageScope::Create(buffer.scope()) : global_scope;
+        is_compute_at ? runtime::StorageScope::Create(buffer.scope()) : global_scope;
     runtime::StorageRank rank = scope.rank;
     if (rank != previous_rank || !var_dom.defined()) {
       previous_rank = rank;
@@ -387,6 +472,10 @@ void RelaxBufferRegions(const Map<Var, PrimExpr>& binding,
           /*low_inclusive=*/relax_path_low_inclusive,
           /*high_exclusive=*/relax_path_high_exclusive,
           /*extra_relax_scope=*/scope));
+    }
+    // In reverse_compute_at mode, check that elements in the produced region are fully produced.
+    if (!is_compute_at && check_reduce_completeness && !IsReductionComplete(var_dom.value())) {
+      throw ProducerNotCompleteError(self->mod, block);
     }
     // Relax the region
     Array<arith::IntSet> relaxed_region =
@@ -396,111 +485,124 @@ void RelaxBufferRegions(const Map<Var, PrimExpr>& binding,
 }
 
 /*!
- * \brief Calculate the iteration domain of a provided integer set to fully cover the required
- * domain
- * \param provided The provided integer set to cover the required domain
- * \param required The required domain to be covered
+ * \brief Calculate the iteration domain of an integer set (`coverer`) to fully cover another
+ * (`coveree`)
+ * \param coverer The integer set to cover the domain
+ * \param coveree The domain to be covered
  * \param dim_max The maximum index bound by the buffer shape
  * \param analyzer The arithmetic analyzer
+ * \return (var, range_info): the variable whose range is constrained by the coverer-coveree
+ * relation, and the range info of the variable. If the coverer-coveree relation holds
+ * unconditionally, return std::nullopt.
  */
-std::pair<Var, BlockVarDomainInfo> SolveBlockVarDomain(const arith::IntSet& provided,
-                                                       const arith::IntSet& required,
-                                                       PrimExpr dim_max,
-                                                       arith::Analyzer* analyzer) {
-  PrimExpr provided_min = analyzer->Simplify(provided.min());
-  PrimExpr provided_max = analyzer->Simplify(provided.max());
-  PrimExpr required_min = analyzer->Simplify(required.min());
-  PrimExpr required_max = analyzer->Simplify(required.max());
+template <bool is_compute_at>
+std::optional<std::pair<Var, BlockVarDomainInfo>> SolveBlockVarDomain(const arith::IntSet& coverer,
+                                                                      const arith::IntSet& coveree,
+                                                                      PrimExpr dim_max,
+                                                                      arith::Analyzer* analyzer) {
+  PrimExpr coverer_min = analyzer->Simplify(coverer.min());
+  PrimExpr coverer_max = analyzer->Simplify(coverer.max());
+  PrimExpr coveree_min = analyzer->Simplify(coveree.min());
+  PrimExpr coveree_max = analyzer->Simplify(coveree.max());
   arith::IntSet var_dom, var_bound;
   Optional<Var> var;
   arith::PVar<Var> p_v;
   arith::PVar<PrimExpr> p_e;
-  if ((p_v * p_e).Match(provided_min) || (p_e * p_v).Match(provided_min)) {
+  if (is_const_int(coverer_min) && is_const_int(coverer_max)) {
+    if (is_compute_at) {
+      ICHECK(analyzer->CanProve(coverer_min <= coveree_min) &&
+             analyzer->CanProve(coverer_max >= coveree_max));
+    } else {
+      ICHECK(analyzer->CanProve(coveree_min <= coverer_min) &&
+             analyzer->CanProve(coveree_max >= coverer_max));
+    }
+    return std::nullopt;
+  } else if ((p_v * p_e).Match(coverer_min) || (p_e * p_v).Match(coverer_min)) {
     PrimExpr e = p_e.Eval();
     var = p_v.Eval();
-    var_dom = arith::IntSet::Interval(floordiv(required_min, e), floordiv(required_max, e));
+    var_dom = arith::IntSet::Interval(floordiv(coveree_min, e), floordiv(coveree_max, e));
     var_bound = arith::IntSet::Interval(0, floordiv(dim_max, e));
-  } else if (analyzer->CanProveEqual(provided_min, provided_max)) {
-    if (p_v.Match(provided_min)) {
+  } else if (analyzer->CanProveEqual(coverer_min, coverer_max)) {
+    if (p_v.Match(coverer_min)) {
       var = p_v.Eval();
-      var_dom = arith::IntSet::Interval(required_min, required_max);
+      var_dom = arith::IntSet::Interval(coveree_min, coveree_max);
       var_bound = arith::IntSet::Interval(0, dim_max);
     } else {
       arith::PVar<PrimExpr> p_f1, p_f2;
-      if ((floordiv(p_f1, p_f2).Match(provided_min))) {
+      if ((floordiv(p_f1, p_f2).Match(coverer_min))) {
         PrimExpr var_expr = p_f1.Eval();
         PrimExpr fac = p_f2.Eval();
         if (analyzer->CanProveGreaterEqual(fac, 1)) {
           if (var_expr->IsInstance<VarNode>()) {
             // a <= (x // factor) <= b, fac > 0 ==> (a * fac) <= x <= (b * fac + fac - 1)
             var = Downcast<Var>(var_expr);
-            var_dom = arith::IntSet::Interval(required_min * fac,
-                                              analyzer->Simplify(required_max * fac + fac - 1));
+            var_dom = arith::IntSet::Interval(coveree_min * fac,
+                                              analyzer->Simplify(coveree_max * fac + fac - 1));
             var_bound = arith::IntSet::Interval(0, analyzer->Simplify(dim_max * fac + fac - 1));
           } else {
-            const arith::IntSet new_provided = arith::IntSet::SinglePoint(p_f1.Eval());
-            const arith::IntSet new_required = arith::IntSet::Interval(
-                required_min * fac, analyzer->Simplify(required_max * fac + fac - 1));
-            return SolveBlockVarDomain(new_provided, new_required, dim_max, analyzer);
+            auto new_coverer = arith::IntSet::SinglePoint(p_f1.Eval());
+            auto new_coveree = arith::IntSet::Interval(
+                coveree_min * fac, analyzer->Simplify(coveree_max * fac + fac - 1));
+            return SolveBlockVarDomain<is_compute_at>(new_coverer, new_coveree, dim_max, analyzer);
           }
         }
-      } else if ((floormod(p_f1, p_f2).Match(provided_min))) {
+      } else if ((floormod(p_f1, p_f2).Match(coverer_min))) {
         PrimExpr var_expr = p_f1.Eval();
         if (var_expr->IsInstance<VarNode>()) {
           // generally domain of (x % fac) enforce no constraints to domain of x
           Var var_mod = Downcast<Var>(var_expr);
-          return {var_mod, BlockVarDomainInfo()};
+          return {{var_mod, BlockVarDomainInfo(is_compute_at)}};
         } else {
           PrimExpr mod_1 = p_f1.Eval();
           PrimExpr mod_2 = p_f2.Eval();
           if (analyzer->CanProveGreaterEqual(mod_1, 1) &&
               analyzer->CanProveGreaterEqual(mod_2, 1)) {
-            const arith::IntSet new_provided = arith::IntSet::SinglePoint(p_f1.Eval());
-            if (analyzer->CanProveGreaterEqual(required_min, 0)) {
-              const arith::IntSet new_required =
-                  arith::IntSet::Interval(required_min, arith::SymbolicLimits::pos_inf_);
-              return SolveBlockVarDomain(new_provided, new_required, dim_max, analyzer);
+            auto new_coverer = arith::IntSet::SinglePoint(p_f1.Eval());
+            if (analyzer->CanProveGreaterEqual(coveree_min, 0)) {
+              auto new_coveree =
+                  arith::IntSet::Interval(coveree_min, arith::SymbolicLimits::pos_inf_);
+              return SolveBlockVarDomain<is_compute_at>(new_coverer, new_coveree, dim_max,
+                                                        analyzer);
             }
           }
         }
       }
     }
   }
-  ICHECK(var.defined()) << "ValueError: BufferRegion pattern match failed: " << provided_min;
-  return {var.value(), BlockVarDomainInfo{var_dom, var_bound}};
+  ICHECK(var.defined()) << "ValueError: BufferRegion pattern match failed: " << coverer_min << ", "
+                        << coverer_max << ", " << coveree_min << ", " << coveree_max;
+  return {{var.value(), BlockVarDomainInfo{var_dom, var_bound}}};
 }
 
 /*!
- * \brief Calculate and update the iteration domain info to fully cover the required domain in
- * dimension-wise fashion. The region relation on each buffer dimension is independently estimated.
+ * \brief Calculate the iteration domain info to fully cover a region `depd_region`.
+ * This function implements dimension-wise method: the region relation on each buffer dimension is
+ * independently estimated.
  * \param buffer The accessed buffer
- * \param provided_region The provided NDIntSet to cover the required domain
- * \param required_region The required NDIntSet domain to be covered
+ * \param self_region The region to cover `depd_region` (the "coverer")
+ * \param depd_region The region to be covered (the "coveree")
  * \param analyzer The arithmetic analyzer
  * \param iter_doms The result iteration domains to be updated
  */
+template <bool is_compute_at>
 void UpdateBlockVarDomainDimwise(
-    const BufferNode* buffer, const NDIntSet& provided_region, const NDIntSet& required_region,
+    const BufferNode* buffer, const NDIntSet& self_region, const NDIntSet& depd_region,
     arith::Analyzer* analyzer, std::unordered_map<const VarNode*, BlockVarDomainInfo>* iter_doms) {
   size_t ndim = buffer->shape.size();
   for (size_t i = 0; i < ndim; ++i) {
-    arith::IntSet provided = provided_region[i];
-    arith::IntSet required = required_region[i];
+    arith::IntSet self = self_region[i];
+    arith::IntSet depd = depd_region[i];
     PrimExpr dim_max = max(buffer->shape[i] - 1, 0);
-
-    if (provided.CanProveSinglePoint(analyzer) && is_const_int(provided.min())) {
-      ICHECK(required.CanProveSinglePoint(analyzer) &&
-             analyzer->CanProveEqual(provided.min(), required.min()));
+    auto result = SolveBlockVarDomain<is_compute_at>(self, depd, dim_max, analyzer);
+    if (!result.has_value()) {
       continue;
     }
-
-    auto [var, dom_info] = SolveBlockVarDomain(provided, required, dim_max, analyzer);
-    auto it = iter_doms->find(var.get());
-    if (it != iter_doms->end()) {
-      it->second.Union(dom_info);
+    auto [var, dom_info] = result.value();
+    if (auto it = iter_doms->find(var.get()); it != iter_doms->end()) {
+      it->second.Join(dom_info, is_compute_at);
     } else {
-      ICHECK(analyzer->CanProveEqual(provided.min(), required.min()));
-      ICHECK(analyzer->CanProveEqual(provided.max(), required.max()));
+      ICHECK(analyzer->CanProveEqual(self.min(), depd.min()));
+      ICHECK(analyzer->CanProveEqual(self.max(), depd.max()));
     }
   }
 }
@@ -533,25 +635,27 @@ Map<Var, arith::IntSet> InverseAffineIterMap(const Array<arith::IterSumExpr>& it
 }
 
 /*!
- * \brief Calculate and update the iteration domain info to fully cover the required domain
- * with affine analysis. It requires bijective mapping of block var to provided region points.
+ * \brief Calculate the iteration domain info to fully cover a region `depd_region`.
+ * This function implements affine analysis. It requires bijective mapping of block var to
+ * `depd_region` points.
  * \param buffer The accessed buffer
  * \param iter_vars The list of block vars to cover the required region
- * \param provided_region The provided NDIntSet to cover the required domain
- * \param required_region The required NDIntSet domain to be covered
+ * \param self_region The region to cover `depd_region` (the "coverer")
+ * \param depd_region The region to be covered (the "coveree")
  * \param analyzer The arithmetic analyzer
  * \param iter_doms The result iteration domains to be updated
  * \returns bool. Denotes whether update success
  */
+template <bool is_compute_at>
 bool UpdateBlockVarDomainAffine(const BufferNode* buffer, const Array<IterVar>& iter_vars,
-                                const NDIntSet& provided_region, const NDIntSet& required_region,
+                                const NDIntSet& self_region, const NDIntSet& depd_region,
                                 arith::Analyzer* analyzer,
                                 std::unordered_map<const VarNode*, BlockVarDomainInfo>* iter_doms) {
-  // we only support single point provided region now, which could cover most cases
-  for (const auto& intset : provided_region) {
+  // we only support single point depd_region now, which could cover most cases
+  for (const auto& intset : self_region) {
     if (!intset.CanProveSinglePoint(analyzer)) return false;
   }
-  // calculate forward mapping (block vars -> provided region point)
+  // calculate forward mapping (block vars -> depd_region point)
   Map<Var, Range> dom_map;
   for (const IterVar& iter_var : iter_vars) {
     dom_map.Set(iter_var->var, iter_var->dom);
@@ -560,67 +664,67 @@ bool UpdateBlockVarDomainAffine(const BufferNode* buffer, const Array<IterVar>& 
   Array<PrimExpr> provide_indices;
   provide_indices.reserve(ndim);
   for (size_t i = 0; i < ndim; ++i) {
-    provide_indices.push_back(provided_region[i].min());
+    provide_indices.push_back(self_region[i].min());
   }
   auto res = arith::DetectIterMap(provide_indices, dom_map, const_true(),
                                   arith::IterMapLevel::Bijective, analyzer, false);
   if (res->indices.empty()) {
     return false;
   }
-  // calculate backward mapping (required region point -> block vars)
-  NDIntSet required_bound;
+  // calculate backward mapping (depd_region point -> block vars)
+  NDIntSet depd_bound;
   for (size_t i = 0; i < ndim; ++i) {
-    required_bound.push_back(
+    depd_bound.push_back(
         arith::IntSet::Interval(make_zero(buffer->shape[i]->dtype), max(buffer->shape[i] - 1, 0)));
   }
-  Map<Var, arith::IntSet> var_dom = InverseAffineIterMap(res->indices, required_region, analyzer);
-  Map<Var, arith::IntSet> var_bound = InverseAffineIterMap(res->indices, required_bound, analyzer);
+  Map<Var, arith::IntSet> var_dom = InverseAffineIterMap(res->indices, depd_region, analyzer);
+  Map<Var, arith::IntSet> var_bound = InverseAffineIterMap(res->indices, depd_bound, analyzer);
   for (const auto& kv : var_dom) {
     const Var& var = kv.first;
     auto it = var_bound.find(var);
     ICHECK(it != var_bound.end());  // InverseAffineIterMap's result vars are assumed stable
-    (*iter_doms)[var.get()].Union(BlockVarDomainInfo{kv.second, (*it).second});
+    BlockVarDomainInfo &lhs = (*iter_doms)[var.get()], rhs{kv.second, (*it).second};
+    lhs.Join(rhs, is_compute_at);
   }
   return true;
 }
 
 /*!
- * \brief Calculate the domain of block vars to cover the required region
- * \param iter_vars The list of block vars to cover the required region
- * \param provided_regions The region provided by one iteration instance of the block vars
- * \param required_regions The region required to be covered
+ * \brief Calculate the domain of block vars to cover the dependent region
+ * \param iter_vars The list of block vars to cover the dependent region
+ * \param self_regions The region covered in one iteration of the block vars
+ * \param depd_regions The region to be covered
  * \param analyzer The arithmetic analyzer
  * \return A list of iteration domain info corresponding to the given list of block vars
  */
-std::vector<BlockVarDomainInfo> CalculateBlockVarDomain(
-    const Array<IterVar>& iter_vars,
-    std::unordered_map<const BufferNode*, std::vector<NDIntSet>> provided_regions,
-    std::unordered_map<const BufferNode*, std::vector<NDIntSet>> required_regions,
-    arith::Analyzer* analyzer) {
+template <bool is_compute_at>
+std::vector<BlockVarDomainInfo> CalculateBlockVarDomain(const Array<IterVar>& iter_vars,
+                                                        const BufferRegionsT& self_regions,
+                                                        const BufferRegionsT& depd_regions,
+                                                        arith::Analyzer* analyzer) {
   int n_iters = iter_vars.size();
   // Step 1. Construct the mapping from block var to their iteration domain (initialized to empty)
   std::unordered_map<const VarNode*, BlockVarDomainInfo> iter_doms;
   iter_doms.reserve(n_iters);
   for (const IterVar& iter_var : iter_vars) {
-    iter_doms[iter_var->var.get()] = BlockVarDomainInfo();
+    iter_doms[iter_var->var.get()] = BlockVarDomainInfo(is_compute_at);
   }
-  // Step 2. For each buffer, update the domain according to the provided and required regions
-  for (const auto& kv : provided_regions) {
-    const BufferNode* buffer = kv.first;
-    const std::vector<NDIntSet>& many_provided_regions = kv.second;
-    // Calculate `provided_region` and `required_region`
-    auto it = required_regions.find(buffer);
-    if (it == required_regions.end() || it->second.empty()) {
+  // Step 2. For each buffer, update the domain:
+  for (const auto& [buffer, many_regions] : self_regions) {
+    // Calculate `self_region` and `depd_region`
+    auto it = depd_regions.find(buffer);
+    if (it == depd_regions.end() || it->second.empty()) {
       continue;
     }
-    NDIntSet required_region = support::NDIntSetUnion(it->second);
-    NDIntSet provided_region = support::NDIntSetUnion(many_provided_regions);
-    ICHECK_EQ(provided_region.size(), buffer->shape.size());
-    ICHECK_EQ(required_region.size(), buffer->shape.size());
-    // Try update iter var domains with current required and provided region pair.
-    if (!UpdateBlockVarDomainAffine(buffer, iter_vars, provided_region, required_region, analyzer,
-                                    &iter_doms)) {
-      UpdateBlockVarDomainDimwise(buffer, provided_region, required_region, analyzer, &iter_doms);
+    NDIntSet depd_region = support::NDIntSetUnion(it->second);
+    NDIntSet self_region = support::NDIntSetUnion(many_regions);
+    ICHECK_EQ(self_region.size(), buffer->shape.size());
+    ICHECK_EQ(depd_region.size(), buffer->shape.size());
+    // Try update iter var domains with current self and depd region pair.
+    if (!UpdateBlockVarDomainAffine<is_compute_at>(buffer, iter_vars, self_region, depd_region,
+                                                   analyzer, &iter_doms)) {
+      UpdateBlockVarDomainDimwise<is_compute_at>(buffer, self_region, depd_region, analyzer,
+                                                 &iter_doms);
     }
   }
   // Union the iter var domains, put them in the same order of block vars, and return
@@ -641,109 +745,96 @@ std::vector<BlockVarDomainInfo> CalculateBlockVarDomain(
 }
 
 /*!
- * \brief Calculate the provided region of the given block by one single of its execution instance,
- * as well as the required buffer regions relaxed to the given loop
+ * \brief Calculate the regions covered by the given block in one single execution instance,
+ * and the regions relaxed to the given loop
  * \tparam is_compute_at Indicates if the operation is compute-at or reverse-compute-at
  * \param block The given block that provides buffer regions
  * \param loop_sref The given loop under which the block is going to be moved to
  * \param block2realize Maps a block to its corresponding BlockRealize
  * \param producer_srefs The producers of the given block
  * \param consumer_srefs The consumers of the given block
- * \param provided_regions The calculated regions provided by the block
- * \param required_regions The calculated regions required by its consumers (in compute-at) or
- * producers (in reverse-compute-at)
+ * \param check_reduce_completeness If false, skip domain completeness check for reduction
+ * iter-vars. Has no effect when `is_compute_at` is True.
+ * \return (self_regions, depd_regions): the regions covered by the block, and the regions covered
+ * by its consumers (in compute-at) or producers (in reverse-compute-at)
  */
 template <bool is_compute_at>
-void CalculateProvidedRequiredRegions(
-    const BlockNode* block, const StmtSRef& loop_sref,
-    std::unordered_map<const BlockNode*, const BlockRealizeNode*> block2realize,
-    Array<StmtSRef> producer_srefs, Array<StmtSRef> consumer_srefs,
-    std::unordered_map<const BufferNode*, std::vector<NDIntSet>>* provided_regions,
-    std::unordered_map<const BufferNode*, std::vector<NDIntSet>>* required_regions) {
-  // Step 1. Calculate the region provided by a single execution instance of `block`
-  const Array<BufferRegion>& provided_buffers = is_compute_at ? block->writes : block->reads;
-  provided_regions->reserve(provided_buffers.size());
-  required_regions->reserve(provided_buffers.size());
-  for (const BufferRegion& provided_buffer_region : provided_buffers) {
-    const BufferNode* buffer = provided_buffer_region->buffer.get();
-    const Array<Range>& region = provided_buffer_region->region;
-    (*provided_regions)[buffer].push_back(support::NDIntSetFromRegion(region));
-    (*required_regions)[buffer].clear();
+std::pair<BufferRegionsT, BufferRegionsT> CalculateSelfAndDepdRegions(
+    const ScheduleState& self, const BlockNode* block, const StmtSRef& loop_sref,
+    const std::unordered_map<const BlockNode*, const BlockRealizeNode*>& block2realize,
+    const Array<StmtSRef>& producer_srefs, const Array<StmtSRef>& consumer_srefs,
+    arith::Analyzer& analyzer, bool check_reduce_completeness = true) {
+  // Step 1. Calculate the region covered by a single execution instance of `block`
+  const Array<BufferRegion>& buffers = is_compute_at ? block->writes : block->reads;
+  BufferRegionsT self_regions, depd_regions;
+  self_regions.reserve(buffers.size());
+  depd_regions.reserve(buffers.size());
+  for (const BufferRegion& self_buffer_region : buffers) {
+    const BufferNode* buffer = self_buffer_region->buffer.get();
+    const Array<Range>& region = self_buffer_region->region;
+    self_regions[buffer].push_back(support::NDIntSetFromRegion(region));
+    depd_regions[buffer].clear();
   }
-  // Step 2. Calculate the region required by dependent blocks under `loop`
-  for (const StmtSRef& required_block_sref : is_compute_at ? consumer_srefs : producer_srefs) {
-    const BlockNode* required_block = TVM_SREF_TO_BLOCK(required_block_sref);
-    ICHECK(block2realize.count(required_block));
-    RelaxBufferRegions</*relax_storage_scope=*/is_compute_at>(
-        /*binding=*/GetBindings(GetRef<BlockRealize>(block2realize.at(required_block))),
-        /*buffer_regions=*/is_compute_at ? required_block->reads : required_block->writes,
-        /*relax_path_low_inclusive=*/GetRef<StmtSRef>(required_block_sref->parent),
-        /*relax_path_high_exclusive=*/loop_sref, /*relaxed=*/required_regions);
+  // Step 2. Calculate the region of dependent blocks under `loop`
+  for (const StmtSRef& depd_block_sref : is_compute_at ? consumer_srefs : producer_srefs) {
+    const BlockNode* depd_block = TVM_SREF_TO_BLOCK(depd_block_sref);
+    auto it = block2realize.find(depd_block);
+    ICHECK(it != block2realize.end());
+    RelaxBufferRegions<is_compute_at>(self, depd_block_sref, GetRef<BlockRealize>(it->second),
+                                      loop_sref, check_reduce_completeness, analyzer, depd_regions);
   }
+  return {self_regions, depd_regions};
 }
 
 /******** Main Implementation ********/
 
 template <bool is_compute_at>
 void ComputeAtOrReverseComputeAtImpl(ScheduleState self, const StmtSRef& block_sref,
-                                     const StmtSRef& loop_sref, bool preserve_unit_loops,
-                                     arith::Analyzer* analyzer, bool check_only = false,
-                                     int index = -1) {
+                                     const StmtSRef& loop_sref, bool preserve_unit_loops, int index,
+                                     bool check_only = false,
+                                     bool check_reduce_completeness = true) {
+  arith::Analyzer analyzer;
   const BlockNode* block = TVM_SREF_TO_BLOCK(block_sref);
   const ForNode* loop = TVM_SREF_TO_FOR(loop_sref);
   // Step 1. Bunch of checks
   // Check condition 1) : scope stage pipeline
   StmtSRef scope_root_sref = GetScopeRoot(self, block_sref,
-                                          /*require_stage_pipeline=*/true);
+                                          /*require_stage_pipeline=*/false);
   Block scope_root = GetRef<Block>(scope_root_sref->StmtAs<BlockNode>());
-  AddShapeVarBounds(self, scope_root_sref.get(), analyzer);
+  AddShapeVarBounds(self, scope_root_sref.get(), &analyzer);
   BlockScope scope = self->GetBlockScope(scope_root_sref);
   Array<StmtSRef> producer_srefs = GetProducers(block_sref, scope);
   Array<StmtSRef> consumer_srefs = GetConsumers(block_sref, scope);
   // Check condition 2) : `block` is a complete or reduction block
-  CheckCompleteOrReductionBlock(self, block_sref, scope_root_sref);
+  // CheckCompleteOrReductionBlock(self, block_sref, scope_root_sref);
   // Check condition 3): `block` and `loop` are under the same scope,
   // and `loop` is not the ancestor of `block`
   NotInSameScopeError::CheckAndBindLoopDomain(self, block_sref, loop_sref, scope_root_sref,
-                                              analyzer);
+                                              &analyzer);
   // Check condition 4): `block` is not an output block
   if (is_compute_at) {
     CheckNotOutputBlock(self, block_sref, scope_root_sref);
   }
   // Step 2. Plan for the removal of `block`
-  ScopeReconstructor reconstructor(scope_root, GetRef<Block>(block), GetRef<For>(loop));
-  LeafBlockRemovalPlan(self, block_sref, &reconstructor.rm_src_stmt_, &reconstructor.rm_tgt_stmt_);
+  auto reconstructor =
+      ScopeReconstructor::CreateWithRemovalPlan(self, scope_root, block_sref, GetRef<For>(loop));
   // Step 3. Find the insertion point under `loop`
   // Check condition 5): all the required block are under the given loop
   std::unordered_map<const BlockNode*, const BlockRealizeNode*> block2realize;
   block2realize.reserve(self->block_info.size());
   int insert_position = FindInsertionPoint<!is_compute_at, is_compute_at>(
-      /*self=*/self,
-      /*subtrees=*/AsArray(loop->body),
-      /*producer_srefs=*/producer_srefs,
-      /*consumer_srefs=*/consumer_srefs, /*block2realize=*/&block2realize,
-      /*index=*/index);
-  // Step 4. Calculate the region provided by a single execution instance of `block`,
-  // as well as the region required by dependent blocks under `loop`.
-  // Here is the definition of `provide` and `require`:
-  // - In compute-at, `provide` means `produce`, and `require` means `consume`
-  // - In reverse-compute-at, `provide` means `consume`, and `require` means `produce`
-  std::unordered_map<const BufferNode*, std::vector<NDIntSet>> provided_regions;
-  std::unordered_map<const BufferNode*, std::vector<NDIntSet>> required_regions;
-  CalculateProvidedRequiredRegions<is_compute_at>(
-      /*block=*/block, /*loop_sref=*/loop_sref, /*block2realize=*/std::move(block2realize),
-      /*producer_srefs=*/std::move(producer_srefs),
-      /*consumer_srefs=*/std::move(consumer_srefs),
-      /*provided_regions=*/&provided_regions, /*required_regions=*/&required_regions);
+      self, scope_root, loop->body, producer_srefs, consumer_srefs, &block2realize, index);
+  // Step 4. Calculate the region covered in a single execution of `block`,
+  // as well as the region covered by dependent blocks under `loop`.
+  auto [self_regions, depd_regions] = CalculateSelfAndDepdRegions<is_compute_at>(
+      self, block, loop_sref, std::move(block2realize), std::move(producer_srefs),
+      std::move(consumer_srefs), analyzer, check_reduce_completeness);
   // Step 5. Calculate the iteration domain for each block var
-  std::vector<BlockVarDomainInfo> iter_doms =
-      CalculateBlockVarDomain(/*iter_vars=*/block->iter_vars,
-                              /*provided_regions=*/std::move(provided_regions),
-                              /*required_regions=*/std::move(required_regions),
-                              /*analyzer=*/analyzer);
+  std::vector<BlockVarDomainInfo> iter_doms = CalculateBlockVarDomain<is_compute_at>(
+      /*iter_vars=*/block->iter_vars, std::move(self_regions), std::move(depd_regions), &analyzer);
   // Step 6. Create the new scope according to the iteration domain
   reconstructor.MakeNewLoop(/*insert_position=*/insert_position, /*iter_doms=*/std::move(iter_doms),
-                            /*analyzer=*/analyzer, /*preserve_unit_loops=*/preserve_unit_loops);
+                            /*analyzer=*/&analyzer, /*preserve_unit_loops=*/preserve_unit_loops);
   Block new_scope_root = Downcast<Block>(reconstructor(scope_root));
 
   // Step 7. Do the actual replacement
@@ -756,29 +847,79 @@ void ComputeAtOrReverseComputeAtImpl(ScheduleState self, const StmtSRef& block_s
   block_info.affine_binding = IsAffineBinding(
       /*realize=*/reconstructor.new_block_realize_,
       /*loop_var_ranges=*/LoopDomainOfSRefTreePath(GetRef<StmtSRef>(block_sref->parent)),
-      /*analyzer=*/analyzer);
+      /*analyzer=*/&analyzer);
 }
 
 void ComputeAt(ScheduleState self, const StmtSRef& block_sref, const StmtSRef& loop_sref,
                bool preserve_unit_loops, int index) {
-  arith::Analyzer analyzer;
-  ComputeAtOrReverseComputeAtImpl<true>(self, block_sref, loop_sref, preserve_unit_loops, &analyzer,
-                                        false, index);
+  ComputeAtOrReverseComputeAtImpl<true>(self, block_sref, loop_sref, preserve_unit_loops, index);
 }
 
 void ReverseComputeAt(ScheduleState self, const StmtSRef& block_sref, const StmtSRef& loop_sref,
                       bool preserve_unit_loops, int index) {
+  ComputeAtOrReverseComputeAtImpl<false>(self, block_sref, loop_sref, preserve_unit_loops, index);
+}
+
+void UnsafeReverseComputeAt(ScheduleState self, const StmtSRef& block_sref,
+                            const StmtSRef& loop_sref, bool preserve_unit_loops, int index) {
+  ComputeAtOrReverseComputeAtImpl<false>(self, block_sref, loop_sref, preserve_unit_loops, index,
+                                         /*check_only=*/false, /*check_reduce_completeness=*/false);
+}
+
+void ReverseComputeRoot(ScheduleState self, const StmtSRef& block_sref) {
+  const BlockNode* block = TVM_SREF_TO_BLOCK(block_sref);
   arith::Analyzer analyzer;
-  ComputeAtOrReverseComputeAtImpl<false>(self, block_sref, loop_sref, preserve_unit_loops,
-                                         &analyzer, false, index);
+  // Step 1. Check scope stage pipeline and get the scope root
+  StmtSRef scope_root_sref = GetScopeRoot(self, block_sref,
+                                          /*require_stage_pipeline=*/false);
+  Block scope_root = GetRef<Block>(scope_root_sref->StmtAs<BlockNode>());
+  BlockScope scope = self->GetBlockScope(scope_root_sref);
+  // Step 2. Set up the analyzer
+  AddShapeVarBounds(self, scope_root_sref.get(), &analyzer);
+  for (const StmtSRefNode* p = block_sref.get(); p != scope_root_sref.get(); p = p->parent) {
+    if (const ForNode* loop = p->StmtAs<ForNode>()) {
+      analyzer.Bind(loop->loop_var, Range::FromMinExtent(loop->min, loop->extent));
+    }
+  }
+  // Step 3. Plan for the removal of `block`
+  auto reconstructor =
+      ScopeReconstructor::CreateWithRemovalPlan(self, scope_root, block_sref, scope_root);
+  // Step 4. Find the insertion point under `loop`
+  // Check condition 5): all the required block are under the given loop
+  Array<StmtSRef> producer_srefs = GetProducers(block_sref, scope);
+  Array<StmtSRef> consumer_srefs = GetConsumers(block_sref, scope);
+  std::unordered_map<const BlockNode*, const BlockRealizeNode*> block2realize;
+  block2realize.reserve(self->block_info.size());
+  int insert_position =
+      FindInsertionPoint<true, false>(self, scope_root, scope_root->body, producer_srefs,
+                                      consumer_srefs, &block2realize, /*index=*/-1);
+  // Step 5. Calculate the region covered in a single execution of `block`,
+  // as well as the region covered by dependent blocks under `loop`.
+  auto [self_regions, depd_regions] = CalculateSelfAndDepdRegions<false>(
+      self, block, scope_root_sref, std::move(block2realize), std::move(producer_srefs),
+      std::move(consumer_srefs), analyzer);
+  // Step 5. Calculate the iteration domain for each block var
+  std::vector<BlockVarDomainInfo> iter_doms = CalculateBlockVarDomain<false>(
+      /*iter_vars=*/block->iter_vars, std::move(self_regions), std::move(depd_regions), &analyzer);
+  // Step 6. Create the new scope according to the iteration domain
+  reconstructor.MakeNewLoop(/*insert_position=*/insert_position, /*iter_doms=*/std::move(iter_doms),
+                            /*analyzer=*/&analyzer, /*preserve_unit_loops=*/true);
+  Block new_scope_root = Downcast<Block>(reconstructor(scope_root));
+  // Step 7. Do the actual replacement
+  self->Replace(scope_root_sref, new_scope_root, {{scope_root, new_scope_root}});
+  // Step 8. Update the cached flags
+  BlockInfo& block_info = self->block_info[block_sref];
+  block_info.affine_binding = IsAffineBinding(
+      /*realize=*/reconstructor.new_block_realize_,
+      /*loop_var_ranges=*/LoopDomainOfSRefTreePath(GetRef<StmtSRef>(block_sref->parent)),
+      /*analyzer=*/&analyzer);
 }
 
 bool CanComputeAt(const ScheduleState& self, const StmtSRef& block_sref, const StmtSRef& loop_sref,
                   bool preserve_unit_loops) {
-  arith::Analyzer analyzer;
   try {
     ComputeAtOrReverseComputeAtImpl<true>(self, block_sref, loop_sref, preserve_unit_loops,
-                                          &analyzer, true);
+                                          /*index=*/-1, /*check_only=*/true);
   } catch (const tvm::runtime::Error& e) {
     return false;
   }
@@ -787,10 +928,9 @@ bool CanComputeAt(const ScheduleState& self, const StmtSRef& block_sref, const S
 
 bool CanReverseComputeAt(const ScheduleState& self, const StmtSRef& block_sref,
                          const StmtSRef& loop_sref, bool preserve_unit_loops) {
-  arith::Analyzer analyzer;
   try {
-    ComputeAtOrReverseComputeAtImpl<false>(self, block_sref, loop_sref, preserve_unit_loops,
-                                           &analyzer, true);
+    ComputeAtOrReverseComputeAtImpl<true>(self, block_sref, loop_sref, preserve_unit_loops,
+                                          /*index=*/-1, /*check_only=*/true);
   } catch (const tvm::runtime::Error& e) {
     return false;
   }

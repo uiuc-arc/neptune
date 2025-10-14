@@ -17,25 +17,15 @@
  * under the License.
  */
 
-/*!
- * \file simplify.h
- * \brief Helper functions to construct and compose IR nodes.
- */
-#ifndef TVM_TIR_TRANSFORMS_SIMPLIFY_H_
-#define TVM_TIR_TRANSFORMS_SIMPLIFY_H_
+#ifndef TVM_TARGET_SOURCE_CODEGEN_TRITON_H_
+#define TVM_TARGET_SOURCE_CODEGEN_TRITON_H_
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/tir/function.h>
 
-namespace tvm {
-namespace tir {
+namespace tvm::codegen {
 
-/* \brief Simplifies the prim func
- *
- * Applies the same behavior as the tir.transform.Simplify pass.
- */
-PrimFunc Simplify(PrimFunc stmt, arith::Analyzer* analyzer);
+String FunctionToTritonScript(const std::string& func_name, const tir::PrimFunc& func);
 
-}  // namespace tir
-}  // namespace tvm
-#endif  // TVM_TIR_TRANSFORMS_SIMPLIFY_H_
+}  // namespace tvm::codegen
+
+#endif  // TVM_TARGET_SOURCE_CODEGEN_TRITON_H_

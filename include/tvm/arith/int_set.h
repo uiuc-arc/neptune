@@ -255,14 +255,14 @@ ExprIntSetMap EvalSetForEachSubExpr(PrimExpr e,
  * \param sets The sets to be combined
  * \return the set after union
  */
-IntSet Union(const Array<IntSet>& sets);
+IntSet Union(const Array<IntSet>& sets, Analyzer* analyzer = nullptr);
 
 /*!
  * \brief The union of N-dimensional integer sets
  * \param nd_int_sets A list of N-dimensional integer sets
  * \return An N-dimensional integer set as the result of union
  */
-Array<IntSet> UnionRegion(const Array<Array<IntSet>>& nd_int_sets);
+Array<IntSet> UnionRegion(const Array<Array<IntSet>>& nd_int_sets, Analyzer* analyzer = nullptr);
 
 /*!
  * \brief Create a lower-bound of union set, where some of the segments may be dropped

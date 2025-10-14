@@ -1624,8 +1624,8 @@ struct TransformBlockLayoutTraits : public UnpackedInstTraits<TransformBlockLayo
   static constexpr bool kIsPure = false;
 
  private:
-  static constexpr size_t kNumInputs = 1;
-  static constexpr size_t kNumAttrs = 1;
+  static constexpr size_t kNumInputs = 2;
+  static constexpr size_t kNumAttrs = 0;
   static constexpr size_t kNumDecisions = 0;
 
   static void UnpackedApplyToSchedule(Schedule sch, BlockRV block_rv, IndexMap index_map) {
@@ -1640,20 +1640,6 @@ struct TransformBlockLayoutTraits : public UnpackedInstTraits<TransformBlockLayo
   }
 
  public:
-  static ObjectRef AttrsAsJSON(const Array<ObjectRef>& attrs) {
-    Array<ObjectRef> attrs_record;
-    attrs_record.reserve(kNumAttrs);
-    attrs_record.push_back(String(::tvm::SaveJSON(attrs[0])));
-    return std::move(attrs_record);
-  }
-
-  static Array<ObjectRef> AttrsFromJSON(const ObjectRef& attrs_record_) {
-    Array<ObjectRef> attrs_record = Downcast<Array<ObjectRef>>(attrs_record_);
-    Array<ObjectRef> attrs;
-    attrs.push_back(::tvm::LoadJSON(Downcast<String>(attrs_record[0])));
-    return attrs;
-  }
-
   template <typename>
   friend struct ::tvm::tir::UnpackedInstTraits;
 };

@@ -15,14 +15,18 @@
 # specific language governing permissions and limitations
 # under the License.
 """Configurations for measurements in the runner"""
+
 import os
+import warnings
+from dataclasses import dataclass
 from threading import Thread
 from typing import NamedTuple, Optional, Union
 
 from tvm import rpc
 
 
-class EvaluatorConfig(NamedTuple):
+@dataclass
+class EvaluatorConfig:
     """Config Details of Evaluator
 
     Parameters
@@ -39,8 +43,14 @@ class EvaluatorConfig(NamedTuple):
     min_repeat_ms: int
         Minimum repeat time in ms. if the execution latency is too short,
         increase the number of runs to the given time (in ms) to reduce the measurement error.
+    enable_cache_flush: bool
+        Whether to flush the cache. This is achieved by passing a `f_preproc` to the time evaluator.
+        Therefore, the cache is flushed every repeat, and not flushed inside a repeat.
+        The `f_preproc` can be one of the following:
+        - "l2_cache_flush_cuda": flush the L2 cache on GPU.
+        - "cache_flush_cpu_non_first_arg": flush the cache on CPU, but only the first argument.
     enable_cpu_cache_flush: bool
-        Whether to flush the cache on CPU.
+        Deprecated. Whether to flush the cache on CPU. Use `enable_cache_flush` instead.
 
     Note
     ----
@@ -51,7 +61,13 @@ class EvaluatorConfig(NamedTuple):
     number: int = 3
     repeat: int = 1
     min_repeat_ms: int = 100
+    enable_cache_flush: bool = False
     enable_cpu_cache_flush: bool = False
+
+    def __post_init__(self):
+        if self.enable_cpu_cache_flush:
+            self.enable_cache_flush = True
+            warnings.warn("enable_cpu_cache_flush is deprecated. Use enable_cache_flush instead.")
 
     @staticmethod
     def _normalized(config: Optional["EvaluatorConfig"]) -> "EvaluatorConfig":
@@ -61,7 +77,7 @@ class EvaluatorConfig(NamedTuple):
             number=config.number,
             repeat=config.repeat,
             min_repeat_ms=config.min_repeat_ms,
-            enable_cpu_cache_flush=config.enable_cpu_cache_flush,
+            enable_cache_flush=config.enable_cache_flush,
         )
         return config
 

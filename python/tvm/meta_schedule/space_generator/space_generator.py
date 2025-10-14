@@ -18,12 +18,10 @@
 Meta Schedule design space generators that generates design
 space for generation of measure candidates.
 """
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Union
 
-# isort: off
-from typing_extensions import Literal
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
-# isort: on
 from tvm._ffi import register_object
 from tvm.ir import IRModule
 from tvm.runtime import Object
@@ -42,21 +40,18 @@ if TYPE_CHECKING:
 class SpaceGenerator(Object):
     """The abstract design space generator interface."""
 
-    ScheduleFnType = Union[
-        Callable[[Schedule], None],  # No output
-        Callable[[Schedule], Schedule],  # Single output
-        Callable[[Schedule], List[Schedule]],  # Multiple outputs
-    ]
+    ScheduleFnType = (
+        Callable[[Schedule], None]  # No output
+        | Callable[[Schedule], Schedule]  # Single output
+        | Callable[[Schedule], list[Schedule]]  # Multiple outputs
+    )
 
-    SpaceGeneratorType = Union[
-        "SpaceGenerator",
-        ScheduleFnType,
-        Literal["post-order-apply", "union"],
-    ]
+    SpaceGeneratorType: TypeAlias = (
+        ScheduleFnType | Literal["post-order-apply", "union"] | "SpaceGenerator"
+    )
 
-    sch_rules: Optional[List["ScheduleRule"]]
-    postprocs: Optional[List["Postproc"]]
-    mutator_probs: Optional[Dict["Mutator", float]]
+    postprocs: list["Postproc"] | None
+    mutator_probs: dict["Mutator", float] | None
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the design space generator with tuning context.
@@ -70,7 +65,7 @@ class SpaceGenerator(Object):
             self, context
         )
 
-    def generate_design_space(self, mod: IRModule) -> List[Schedule]:
+    def generate_design_space(self, mod: IRModule) -> list[Schedule]:
         """Generate design spaces given a module.
 
         Parameters
@@ -80,7 +75,7 @@ class SpaceGenerator(Object):
 
         Returns
         -------
-        design_spaces : List[tvm.tir.Schedule]
+        design_spaces : list[tvm.tir.Schedule]
             The generated design spaces, i.e., schedules.
         """
         return _ffi_api.SpaceGeneratorGenerateDesignSpace(self, mod)  # type: ignore # pylint: disable=no-member
@@ -97,10 +92,7 @@ class SpaceGenerator(Object):
 
     @staticmethod
     def create(  # pylint: disable=keyword-arg-before-vararg
-        kind: Union[
-            Literal["post-order-apply", "union"],
-            ScheduleFnType,
-        ] = "post-order-apply",
+        kind: Literal["post-order-apply", "union"] | ScheduleFnType = "post-order-apply",
         *args,
         **kwargs,
     ) -> "SpaceGenerator":
@@ -115,11 +107,10 @@ class SpaceGenerator(Object):
 
             def create_schedule_fn(
                 func,
-                sch_rules=[],
                 postprocs=[],
                 mutator_probs={},
             ):  # pylint: disable=dangerous-default-value
-                return ScheduleFn(func, sch_rules, postprocs, mutator_probs)
+                return ScheduleFn(func, postprocs, mutator_probs)
 
             return create_schedule_fn(kind, *args, **kwargs)  # type: ignore
         if kind == "post-order-apply":
@@ -132,56 +123,43 @@ class SpaceGenerator(Object):
 
 
 ScheduleFnType = SpaceGenerator.ScheduleFnType
-ScheduleRuleType = Union[
-    List["ScheduleRule"],
-    Literal["llvm", "cuda", "cuda-tensorcore", "hexagon", "from-target"],
-]
-PostprocType = Union[
-    List["Postproc"],
-    Literal["llvm", "cuda", "cuda-tensorcore", "hexagon", "from-target"],
-]
-MutatorProbType = Union[
-    Dict["Mutator", float],
-    Literal["llvm", "cuda", "cuda-tensorcore", "hexagon", "from-target"],
-]
+ScheduleRuleType = (
+    Sequence["ScheduleRule"] | Literal["llvm", "cuda", "cuda-tensorcore", "hexagon", "from-target"]
+)
+PostprocType = (
+    Sequence["Postproc"] | Literal["llvm", "cuda", "cuda-tensorcore", "hexagon", "from-target"]
+)
+MutatorProbType = (
+    Mapping["Mutator", float] | Literal["llvm", "cuda", "cuda-tensorcore", "hexagon", "from-target"]
+)
 create = SpaceGenerator.create  # pylint: disable=invalid-name
 
 
 def _normalize_rules(
-    sch_rules: ScheduleRuleType,
     postprocs: PostprocType,
     mutator_probs: MutatorProbType,
-) -> Tuple[
-    Optional[List["ScheduleRule"]],
-    Optional[List["Postproc"]],
-    Optional[Dict["Mutator", float]],
+) -> tuple[
+    Sequence["Postproc"] | None,
+    Mapping["Mutator", float] | None,
 ]:
     # pylint: disable=import-outside-toplevel
     from ..mutator import Mutator
     from ..postproc import Postproc
-    from ..schedule_rule import ScheduleRule
 
     # pylint: enable=import-outside-toplevel
-    assert sch_rules is not None
     assert postprocs is not None
     assert mutator_probs is not None
 
-    if isinstance(sch_rules, str):
-        if sch_rules == "from-target":
-            sch_rules = None
-        else:
-            sch_rules = ScheduleRule.create(sch_rules)
-    if isinstance(postprocs, str):
-        if postprocs == "from-target":
-            postprocs = None
-        else:
-            postprocs = Postproc.create(postprocs)
-    if isinstance(mutator_probs, str):
-        if mutator_probs == "from-target":
-            mutator_probs = None
-        else:
-            mutator_probs = Mutator.create(mutator_probs)
-    return sch_rules, postprocs, mutator_probs  # type: ignore
+    def create_or_none(arg, cls):
+        if not isinstance(arg, str):
+            return arg
+        if arg == "from-target":
+            return None
+        return cls.create(arg)
+
+    postprocs_ = create_or_none(postprocs, Postproc)
+    mutator_probs_ = create_or_none(mutator_probs, Mutator)
+    return postprocs_, mutator_probs_
 
 
 @register_object("meta_schedule.PySpaceGenerator")
@@ -195,21 +173,19 @@ class _PySpaceGenerator(SpaceGenerator):
 
     def __init__(
         self,
-        sch_rules: ScheduleRuleType = "from-target",
         postprocs: PostprocType = "from-target",
         mutator_probs: MutatorProbType = "from-target",
-        f_initialize_with_tune_context: Optional[Callable] = None,
-        f_generate_design_space: Optional[Callable] = None,
-        f_clone: Optional[Callable] = None,
+        f_initialize_with_tune_context: Callable | None = None,
+        f_generate_design_space: Callable | None = None,
+        f_clone: Callable | None = None,
     ):
         """Constructor."""
-        sch_rules, postprocs, mutator_probs = _normalize_rules(sch_rules, postprocs, mutator_probs)
+        postprocs_, mutator_probs_ = _normalize_rules(postprocs, mutator_probs)
 
         self.__init_handle_by_constructor__(
             _ffi_api.SpaceGeneratorPySpaceGenerator,  # type: ignore # pylint: disable=no-member
-            sch_rules,
-            postprocs,
-            mutator_probs,
+            postprocs_,
+            mutator_probs_,
             f_initialize_with_tune_context,
             f_generate_design_space,
             f_clone,
@@ -226,7 +202,7 @@ class PySpaceGenerator:
 
     _tvm_metadata = {
         "cls": _PySpaceGenerator,
-        "fields": ["sch_rules", "postprocs", "mutator_probs"],
+        "fields": ["postprocs", "mutator_probs"],
         "methods": ["_initialize_with_tune_context", "generate_design_space", "clone"],
     }
 
@@ -240,7 +216,7 @@ class PySpaceGenerator:
         """
         raise NotImplementedError
 
-    def generate_design_space(self, mod: IRModule) -> List[Schedule]:
+    def generate_design_space(self, mod: IRModule) -> list[Schedule]:
         """Generate design spaces given a module.
 
         Parameters
@@ -250,7 +226,7 @@ class PySpaceGenerator:
 
         Returns
         -------
-        design_spaces : List[tvm.tir.Schedule]
+        design_spaces : list[tvm.tir.Schedule]
             The generated design spaces, i.e., schedules.
         """
         raise NotImplementedError

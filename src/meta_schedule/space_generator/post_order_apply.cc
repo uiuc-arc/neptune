@@ -17,6 +17,7 @@
  * under the License.
  */
 #include "../utils.h"
+#include "tvm/meta_schedule/schedule_rule.h"
 
 namespace tvm {
 namespace meta_schedule {
@@ -33,9 +34,12 @@ class PostOrderApplyNode : public SpaceGeneratorNode {
   runtime::PackedFunc f_block_filter_ = nullptr;
   /*! \brief The random state. -1 means using random number. */
   TRandState rand_state_ = -1;
+  /*! \brief The schedule rules. */
+  Optional<Array<ScheduleRule>> sch_rules;
 
   void VisitAttrs(tvm::AttrVisitor* v) {
     SpaceGeneratorNode::VisitAttrs(v);
+    v->Visit("sch_rules", &sch_rules);
     // `rand_state_` is not visited
     // `sch_rules_` is not visited
   }
@@ -43,6 +47,36 @@ class PostOrderApplyNode : public SpaceGeneratorNode {
   void InitializeWithTuneContext(const TuneContext& context) final {
     SpaceGeneratorNode::InitializeWithTuneContext(context);
     this->rand_state_ = ForkSeed(&context->rand_state);
+    if (context->target.defined() && !sch_rules.defined()) {
+      String kind = GetRuleKindFromTarget(context->target.value());
+      if (kind == "llvm") {
+        sch_rules = ScheduleRule::DefaultLLVM();
+      } else if (kind == "cuda") {
+        sch_rules = ScheduleRule::DefaultCUDA();
+      } else if (kind == "cuda-tensorcore") {
+        sch_rules = ScheduleRule::DefaultCUDATensorCore();
+      } else if (kind == "hexagon") {
+        sch_rules = ScheduleRule::DefaultHexagon();
+      } else if (kind == "vnni") {
+        sch_rules = ScheduleRule::DefaultX86("vnni");
+      } else if (kind == "avx512") {
+        sch_rules = ScheduleRule::DefaultX86("avx512");
+      } else if (kind == "c") {
+        sch_rules = ScheduleRule::DefaultMicro();
+      } else if (kind == "asimd") {
+        sch_rules = ScheduleRule::DefaultARM("neon");
+      } else if (kind == "dotprod") {
+        sch_rules = ScheduleRule::DefaultARM("dotprod");
+      } else {
+        LOG(FATAL) << "Unsupported kind: " << kind;
+        throw;
+      }
+    }
+    if (sch_rules.defined()) {
+      for (ScheduleRule rule : sch_rules.value()) {
+        rule->InitializeWithTuneContext(context);
+      }
+    }
   }
 
   Array<tir::Schedule> GenerateDesignSpace(const IRModule& mod) final {
@@ -97,6 +131,15 @@ class PostOrderApplyNode : public SpaceGeneratorNode {
   SpaceGenerator Clone() const final {
     ObjectPtr<PostOrderApplyNode> n = make_object<PostOrderApplyNode>(*this);
     CloneRules(this, n.get());
+    if (this->sch_rules.defined()) {
+      Array<ScheduleRule> original = this->sch_rules.value();
+      Array<ScheduleRule> sch_rules;
+      sch_rules.reserve(original.size());
+      for (const ScheduleRule& sch_rule : original) {
+        sch_rules.push_back(sch_rule->Clone());
+      }
+      n->sch_rules = std::move(sch_rules);
+    }
     return SpaceGenerator(n);
   }
   static constexpr const char* _type_key = "meta_schedule.PostOrderApply";

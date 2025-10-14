@@ -132,7 +132,7 @@ class CrossThreadReductionNode : public ScheduleRuleNode {
     for (const tir::LoopRV& loop_rv : axes) {
       const tir::For& loop = sch->Get(loop_rv);
       runtime::ThreadScope thread_scope = tir::GetThreadScope(loop.get());
-      if (tir::IsThreadIdx(thread_scope)) {
+      if (runtime::IsThreadIdx(thread_scope)) {
         return true;
       }
     }

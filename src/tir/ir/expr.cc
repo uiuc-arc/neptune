@@ -21,16 +21,16 @@
  * \file expr.cc
  */
 #include <tvm/runtime/registry.h>
+#include <tvm/support/iterator.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 
+#include <algorithm>
 #include <optional>
 
 #include "../../arith/scalable_expression.h"
-#include "../../support/str_escape.h"
-#include "buffer_common.h"
 
 namespace tvm {
 namespace tir {
@@ -559,30 +559,16 @@ Call::Call(DataType dtype, RelayExpr op, Array<PrimExpr> args, Span span) {
 
 TVM_REGISTER_GLOBAL("tir.Call")
     .set_body_typed([](DataType type, RelayExpr op,
-                       Array<Variant<runtime::String, IterVar, BufferRegion, PrimExpr>> args,
-                       Span span) {
+                       Array<Variant<runtime::String, IterVar, PrimExpr>> args, Span span) {
       Array<PrimExpr> prim_expr_args;
       for (const auto& it : args) {
         ICHECK(it->IsInstance<runtime::StringObj>() || it->IsInstance<PrimExprNode>() ||
-               it->IsInstance<IterVarNode>() || it->IsInstance<BufferRegionNode>())
+               it->IsInstance<IterVarNode>())
             << "Argument " << it << " is not a string or primexpr";
         if (const auto* str = it.as<runtime::StringObj>()) {
           prim_expr_args.push_back(StringImm(str->data));
         } else if (const auto* iter_var = it.as<IterVarNode>()) {
           prim_expr_args.push_back(iter_var->var);
-        } else if (const auto* br = it.as<BufferRegionNode>()) {
-          Array<PrimExpr> indices;
-          for (Range r : br->region) {
-            if (is_one(r->extent)) {
-              indices.push_back(r->min);
-            } else if (r->extent.as<IntImmNode>()) {
-              indices.push_back(tir::Ramp(r->min, make_const(r->min->dtype, 1), r->extent));
-            } else {
-              LOG(FATAL) << "ValueError: Cannot convert to BufferLoad: "
-                         << GetRef<BufferRegion>(br);
-            }
-          }
-          prim_expr_args.push_back(BufferLoad(br->buffer, indices));
         } else {
           prim_expr_args.push_back(Downcast<PrimExpr>(it));
         }
@@ -831,6 +817,154 @@ TVM_REGISTER_GLOBAL("tir.BufferLoad")
                        Span span) { return BufferLoad(buffer, indices, predicate, span); });
 
 TVM_REGISTER_NODE_TYPE(BufferLoadNode);
+
+// BufferRegion
+Array<Optional<Integer>> TrivialO2IMap(const Array<Range>& region) {
+  Array<Optional<Integer>> output_to_input_dims;
+  for (size_t i = 0; i < region.size(); ++i) {
+    output_to_input_dims.push_back(Integer(i));
+  }
+  return output_to_input_dims;
+}
+
+bool IsFullSlice(const Range& range, const PrimExpr& buf_size) {
+  auto *buf_size_ = as_const_int(buf_size), *slice_extent = as_const_int(range->extent);
+  return is_const_int(range->min, 0) && buf_size_ && slice_extent && *buf_size_ == *slice_extent;
+}
+
+BufferRegion::BufferRegion(Buffer buffer, Array<Range> region)
+    : BufferRegion(buffer, region, TrivialO2IMap(region)) {}
+
+BufferRegion::BufferRegion(Buffer buffer, Array<Range> region,
+                           Array<Optional<Integer>> output_to_input_dims, Span span) {
+  CHECK_EQ(buffer->shape.size(), region.size())
+      << "The dimension between " << buffer << " and region " << region
+      << " mismatched; the buffer has " << buffer->shape.size() << " dimensions";
+  // Check `output_to_input_dims`.
+  // 1. All dim values are in range [0, buffer->shape.size());
+  // 2. The dim values are monotonically increasing;
+  // 3. if a dimension isn't in `output_to_input_dims`, it must be squeezed, and the corresponding
+  //    range in `region` must have extent 1.
+  auto all_dims = support::range(0ul, buffer->shape.size()).to_container<std::unordered_set>();
+  std::vector<int64_t> defined_dims;
+  // Condition 1
+  for (auto dim : output_to_input_dims) {
+    if (!dim.defined()) {
+      continue;
+    }
+    int64_t value = dim.value()->value;
+    ICHECK(value >= 0 && value < buffer->shape.size())
+        << "`output_to_input_dims` must be in range [0, buffer->shape.size())";
+    defined_dims.push_back(value);
+    all_dims.erase(value);
+  }
+  // Condition 2
+  for (size_t i = 1; i < defined_dims.size(); ++i) {
+    ICHECK(defined_dims[i] > defined_dims[i - 1])
+        << "`output_to_input_dims` must be monotonically increasing";
+  }
+  // Condition 3
+  for (auto dim : all_dims) {
+    ICHECK(is_const_int(region[dim]->extent, 1))
+        << "Dimension " << dim
+        << " is not in `output_to_input_dims`, so its range must have extent 1; got "
+        << region[dim];
+  }
+  ObjectPtr<BufferRegionNode> node = make_object<BufferRegionNode>();
+  node->region = std::move(region);
+  node->output_to_input_dims = std::move(output_to_input_dims);
+  node->dtype = buffer->dtype;
+  node->buffer = std::move(buffer);
+  node->span = std::move(span);
+  data_ = std::move(node);
+}
+
+BufferRegion BufferRegion::FullRegion(Buffer buffer) {
+  Array<Range> region;
+  for (PrimExpr extent : buffer->shape) {
+    region.push_back(Range::FromMinExtent(0, extent));
+  }
+  return BufferRegion(buffer, region);
+}
+
+BufferRegion BufferRegion::FromPoint(Buffer buffer, Array<PrimExpr> indices) {
+  Array<Range> region;
+  for (const PrimExpr& index : indices) {
+    if (const RampNode* ramp_index = index.as<RampNode>()) {
+      region.push_back(
+          Range::FromMinExtent(ramp_index->base, ramp_index->stride * ramp_index->lanes));
+    } else {
+      region.push_back(Range::FromMinExtent(index, make_const(index.dtype(), 1)));
+    }
+  }
+  return BufferRegion(buffer, region);
+}
+
+bool BufferRegionNode::IsFullRegion() const {
+  auto unsqueezes = AsUnsqueezeOnly();
+  if (!unsqueezes.has_value()) {
+    return false;
+  }
+  return std::none_of(unsqueezes->begin(), unsqueezes->end(),
+                      [](bool is_unsqueeze) { return is_unsqueeze; });
+}
+
+std::optional<std::vector<bool>> BufferRegionNode::AsUnsqueezeOnly() const {
+  for (size_t i = 0; i < region.size(); ++i) {
+    if (!IsFullSlice(region[i], buffer->shape[i])) {
+      return std::nullopt;
+    }
+  }
+  std::vector<bool> is_expand_dim;
+  size_t last_input_dim = 0;
+  for (auto& dim : output_to_input_dims) {
+    if (dim.defined()) {
+      size_t dim_value = dim.value()->value;
+      // We have checked that `output_to_input_dims` is monotonically increasing, so we can
+      // confirm squeezing happens if we see a dimension that is not consecutive.
+      if (dim_value > last_input_dim + 1) {
+        return std::nullopt;
+      }
+      last_input_dim = dim_value;
+      is_expand_dim.push_back(false);
+    } else {
+      is_expand_dim.push_back(true);
+    }
+  }
+  return is_expand_dim;
+}
+
+Array<ExprOrRangeOrNull> BufferRegionNode::ConvertToIndices() const {
+  Array<ExprOrRangeOrNull> ret;
+  ret.reserve(region.size());
+  size_t region_idx = 0;
+  for (auto& dim : output_to_input_dims) {
+    if (dim.defined()) {
+      auto dim_value = dim.value()->value;
+      for (; region_idx < dim_value; ++region_idx) {
+        ICHECK(is_const_int(region[region_idx]->extent, 1));
+        ret.push_back(ExprOrRangeOrNull(region[region_idx]->min));
+      }
+      ret.push_back(ExprOrRangeOrNull(region[dim_value]));
+      region_idx = dim_value + 1;
+    } else {
+      ret.push_back(NullOpt);
+    }
+  }
+  for (; region_idx < region.size(); ++region_idx) {
+    ICHECK(is_const_int(region[region_idx]->extent, 1));
+    ret.push_back(ExprOrRangeOrNull(region[region_idx]->min));
+  }
+  return ret;
+}
+
+TVM_REGISTER_GLOBAL("tir.BufferRegion")
+    .set_body_typed([](Buffer buffer, Array<Range> region,
+                       Optional<Array<Optional<Integer>>> output_to_input_dims) {
+      return BufferRegion(buffer, region, output_to_input_dims.value_or(TrivialO2IMap(region)));
+    });
+
+TVM_REGISTER_NODE_TYPE(BufferRegionNode);
 
 // ProducerLoad
 ProducerLoad::ProducerLoad(DataProducer producer, Array<PrimExpr> indices, Span span) {

@@ -32,7 +32,6 @@
 #include "../../arith/ir_mutator_with_analyzer.h"
 #include "../analysis/control_flow_graph.h"
 #include "remove_no_op.h"
-#include "simplify.h"
 
 namespace tvm {
 namespace tir {

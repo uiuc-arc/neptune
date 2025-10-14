@@ -21,8 +21,8 @@ import tvm.testing
 from tvm import te, tir
 from tvm.script import tir as T
 from tvm.tir.schedule.testing import (
-    verify_trace_roundtrip,
     assert_structural_equal_ignore_global_symbol,
+    verify_trace_roundtrip,
 )
 
 # fmt: off
@@ -720,46 +720,6 @@ def fail_subtree_compact_dataflow(a: T.handle, c: T.handle) -> None:
         with T.block("C"):
             vi, vj = T.axis.remap("SS", [i, j])
             C[vi, vj] = B[vi, vj] + 1.0
-
-
-@T.prim_func
-def fail_all_consumers_under_loop(a: T.handle, c: T.handle, d: T.handle) -> None:
-    A = T.match_buffer(a, (128, 128), "float32")
-    B = T.alloc_buffer((128, 128), "float32")
-    C = T.match_buffer(c, (128, 128), "float32")
-    D = T.match_buffer(d, (128, 128), "float32")
-    for i, j in T.grid(128, 128):
-        with T.block("B"):
-            vi, vj = T.axis.remap("SS", [i, j])
-            B[vi, vj] = A[vi, vj] * 2.0
-    for i, j in T.grid(128, 128):
-        with T.block("C"):
-            vi, vj = T.axis.remap("SS", [i, j])
-            C[vi, vj] = B[vi, vj] + 1.0
-    for i, j in T.grid(128, 128):
-        with T.block("D"):
-            vi, vj = T.axis.remap("SS", [i, j])
-            D[vi, vj] = B[vi, vj] + 1.0
-
-
-@T.prim_func
-def fail_all_producers_under_loop(a: T.handle, d: T.handle) -> None:
-    A = T.match_buffer(a, (128, 128), "float32")
-    B = T.alloc_buffer((128, 128), "float32")
-    C = T.alloc_buffer((128, 128), "float32")
-    D = T.match_buffer(d, (128, 128), "float32")
-    for i, j in T.grid(128, 128):
-        with T.block("B"):
-            vi, vj = T.axis.remap("SS", [i, j])
-            B[vi, vj] = A[vi, vj] * 2.0
-    for i, j in T.grid(128, 128):
-        with T.block("C"):
-            vi, vj = T.axis.remap("SS", [i, j])
-            C[vi, vj] = A[vi, vj] + 1.0
-    for i, j in T.grid(128, 128):
-        with T.block("D"):
-            vi, vj = T.axis.remap("SS", [i, j])
-            D[vi, vj] = B[vi, vj] + C[vi, vj]
 
 
 @T.prim_func
@@ -1466,20 +1426,98 @@ def test_fail_output_block(use_block_name):
         sch.compute_at(block, loop)
 
 
-def test_fail_all_consumers_under_loop(use_block_name):
-    sch = tir.Schedule(fail_all_consumers_under_loop, debug_mask="all")
+def test_out_of_loop_consumer(use_block_name):
+    @T.prim_func
+    def out_of_loop_consumer(a: T.handle, c: T.handle, d: T.handle) -> None:
+        A = T.match_buffer(a, (128, 128), "float32")
+        B = T.alloc_buffer((128, 128), "float32")
+        C = T.match_buffer(c, (128, 128), "float32")
+        D = T.match_buffer(d, (128, 128), "float32")
+        for i, j in T.grid(128, 128):
+            with T.block("B"):
+                vi, vj = T.axis.remap("SS", [i, j])
+                B[vi, vj] = A[vi, vj] * 2.0
+        for i, j in T.grid(128, 128):
+            with T.block("C"):
+                vi, vj = T.axis.remap("SS", [i, j])
+                C[vi, vj] = B[vi, vj] + 1.0
+        for i, j in T.grid(128, 128):
+            with T.block("D"):
+                vi, vj = T.axis.remap("SS", [i, j])
+                D[vi, vj] = B[vi, vj] + 1.0
+
+    @T.prim_func
+    def after_compute_at(a: T.handle, c: T.handle, d: T.handle):
+        A = T.match_buffer(a, (128, 128), "float32")
+        B = T.alloc_buffer((128, 128), "float32")
+        C = T.match_buffer(c, (128, 128), "float32")
+        D = T.match_buffer(d, (128, 128), "float32")
+        for i in range(128):
+            for ax0, ax1 in T.grid(128, 128):
+                with T.block("B"):
+                    vi, vj = T.axis.remap("SS", [ax0, ax1])
+                    B[vi, vj] = A[vi, vj] * T.float32(2)
+            for j in range(128):
+                with T.block("C"):
+                    vi, vj = T.axis.remap("SS", [i, j])
+                    C[vi, vj] = B[vi, vj] + T.float32(1)
+        for i, j in T.grid(128, 128):
+            with T.block("D"):
+                vi, vj = T.axis.remap("SS", [i, j])
+                D[vi, vj] = B[vi, vj] + T.float32(1)
+
+    sch = tir.Schedule(out_of_loop_consumer, debug_mask="all")
     block = "B" if use_block_name else sch.get_block("B")
     loop, _ = sch.get_loops(sch.get_block("C"))
-    with pytest.raises(tvm.tir.ScheduleError, match="requires all the consumer"):
-        sch.compute_at(block, loop)
+    sch.compute_at(block, loop)
+    assert_structural_equal_ignore_global_symbol(sch.mod["main"], after_compute_at)
 
 
-def test_fail_all_producers_under_loop(use_block_name):
-    sch = tir.Schedule(fail_all_producers_under_loop, debug_mask="all")
+def test_out_of_loop_producer(use_block_name):
+    @T.prim_func
+    def out_of_loop_producer(a: T.handle, d: T.handle) -> None:
+        A = T.match_buffer(a, (128, 128), "float32")
+        B = T.alloc_buffer((128, 128), "float32")
+        C = T.alloc_buffer((128, 128), "float32")
+        D = T.match_buffer(d, (128, 128), "float32")
+        for i, j in T.grid(128, 128):
+            with T.block("B"):
+                vi, vj = T.axis.remap("SS", [i, j])
+                B[vi, vj] = A[vi, vj] * 2.0
+        for i, j in T.grid(128, 128):
+            with T.block("C"):
+                vi, vj = T.axis.remap("SS", [i, j])
+                C[vi, vj] = A[vi, vj] + 1.0
+        for i, j in T.grid(128, 128):
+            with T.block("D"):
+                vi, vj = T.axis.remap("SS", [i, j])
+                D[vi, vj] = B[vi, vj] + C[vi, vj]
+
+    @T.prim_func
+    def after_rev_compute_at(a: T.handle, d: T.handle):
+        A = T.match_buffer(a, (128, 128), "float32")
+        B = T.alloc_buffer((128, 128), "float32")
+        C = T.alloc_buffer((128, 128), "float32")
+        D = T.match_buffer(d, (128, 128), "float32")
+        for i, j in T.grid(128, 128):
+            with T.block("B"):
+                vi, vj = T.axis.remap("SS", [i, j])
+                B[vi, vj] = A[vi, vj] * T.float32(2)
+        for i in range(128):
+            for j in range(128):
+                with T.block("C"):
+                    vi, vj = T.axis.remap("SS", [i, j])
+                    C[vi, vj] = A[vi, vj] + T.float32(1)
+            for ax0 in range(128):
+                with T.block("D"):
+                    vi, vj = T.axis.remap("SS", [i, ax0])
+                    D[vi, vj] = B[vi, vj] + C[vi, vj]
+
+    sch = tir.Schedule(out_of_loop_producer, debug_mask="all")
     block = "D" if use_block_name else sch.get_block("D")
     loop, _ = sch.get_loops(sch.get_block("C"))
-    with pytest.raises(tvm.tir.ScheduleError, match="requires all the producer"):
-        sch.reverse_compute_at(block, loop)
+    sch.reverse_compute_at(block, loop)
+    assert_structural_equal_ignore_global_symbol(sch.mod["main"], after_rev_compute_at)
 
 
 def test_compute_at_int64_loop(use_block_name):

@@ -14,13 +14,75 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
+[build-system]
+requires = ["setuptools", "Cython"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tvm"
+version = "0.18.0"
+requires-python = ">=3.10"
+description = "TVM: An End to End Tensor IR/DSL Stack for Deep Learning Systems"
+authors = [{ name = "Apache TVM" }]
+license = { file = "LICENSE" }
+# See https://pypi.org/classifiers/
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Education",
+  "Intended Audience :: Science/Research",
+]
+keywords = ["machine learning"]
+
+dependencies = [
+  "attrs ~= 23.2",
+  "cloudpickle ~= 3.0",
+  "decorator ~= 5.1",
+  "ml-dtypes ~= 0.3",
+  "numpy ~= 1.26",
+  "psutil ~= 5.9",
+  "scipy ~= 1.12",
+  "tornado ~= 6.4",
+  "typing-extensions ~= 4.10",
+  "beartype ~= 0.17",
+  "sympy ~= 1.13",
+]
+
+[project.optional-dependencies]
+test = ["pytest ~= 8.1"]
+xgboost = ["torch", "xgboost >= 2.0.3"]
+highlight = ["pygments ~= 2.19", "packaging ~= 24.2"]
+dev = [
+  "torch == 2.6.0",
+  "triton == 3.2.0",
+  # Profiling and plotting
+  "nvtx == 0.2.11",
+  "matplotlib >= 3.10",
+  "seaborn >= 0.13",
+  "perfetto == 0.13.1",
+  "pandas >= 2",
+  # For building xformers
+  "setuptools>=80",
+]
+# The following packages need to be installed manually because they have custom flags or requirements
+# that pyproject.toml doesn't support.
+# pip install flash-attn==2.7.4.post1 --no-build-isolation
+# pip install flashinfer-python==0.2.4 -i https://flashinfer.ai/whl/cu124/torch2.6/
+# MAX_JOBS=32 pip install xformers==0.0.29.post3
+# MAX_JOBS=32 pip install mirage-project==0.2.2
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+
 [tool.isort]
 profile = "black"
 src_paths = ["python", "tests/python"]
 
 [tool.black]
 line-length = 100
-target-version = ['py36']
+target-version = ['py310']
 include = '(\.pyi?$)'
 exclude = '''
 

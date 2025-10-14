@@ -37,3 +37,4 @@ from .iter_affine_map import (
     subspace_divide,
     inverse_affine_iter_map,
 )
+from .sympy_tools import invert_binfunc

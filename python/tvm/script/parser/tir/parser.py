@@ -226,39 +226,21 @@ def visit_assign(self: Parser, node: doc.Assign) -> None:
     if len(node.targets) != 1:
         self.report_error(node, "Consequential assignments like 'a = b = c' are not supported.")
     lhs = node.targets[0]
-
-    if isinstance(node.value, doc.Subscript):
-        check_slices = []
-        if isinstance(node.value.slice, doc.Slice):
-            check_slices = [node.value.slice]
-        elif isinstance(node.value.slice, doc.Tuple):
-            for p in node.value.slice.elts:
-                if isinstance(p, doc.Slice):
-                    check_slices.append(p)
-        for s in check_slices:
-            if not s.step and s.upper and s.lower:
-                s.step = doc.Constant(
-                    1,
-                    None,
-                    1,
-                    1,
-                    s.upper.lineno,
-                    s.upper.end_col_offset + 1,
-                    s.upper.lineno,
-                    s.upper.end_col_offset + 2,
-                )
-
     rhs = self.eval_expr(node.value)
-    if isinstance(lhs, doc.Subscript):
-        if isinstance(lhs.slice, doc.Tuple):
-            indices = []
-            for index in lhs.slice.elts:
-                indices.append(self.eval_expr(index))
-        else:
-            indices = self.eval_expr(lhs.slice)
-        T.buffer_store(self.eval_expr(lhs.value), rhs, indices)
-    else:
+    if not isinstance(lhs, doc.Subscript):
         self.eval_assign(target=lhs, source=rhs, bind_value=bind_assign_value)
+        return
+    buffer = self.eval_expr(lhs.value)
+    indices = self.eval_expr(lhs.slice)
+    # We can simply reuse the logic of Buffer.__getitem__ by calling it.
+    buffer_op = buffer[indices]
+    # ... then depending on the return type, do one of the two things we can do:
+    if isinstance(buffer_op, tvm.tir.BufferLoad):
+        # ... create a buffer store, if `buffer_op` is a BufferLoad
+        T.buffer_store(buffer_op.buffer, rhs, buffer_op.indices)
+    else:
+        # ... or create a buffer region store, if `buffer_op` is a BufferRegion.
+        T.buffer_region_store(buffer_op, rhs)
 
 
 @dispatch.register(token="tir", type_name="AugAssign")
@@ -302,16 +284,16 @@ def visit_aug_assign(self: Parser, node: doc.AugAssign) -> None:
         rhs = self.eval_expr(op)
     lhs = node.target
     lhs.ctx = doc.Store(*lhs_pos)
-    if isinstance(lhs, doc.Subscript):
-        if isinstance(lhs.slice, doc.Tuple):
-            indices = []
-            for index in lhs.slice.elts:
-                indices.append(self.eval_expr(index))
-        else:
-            indices = [self.eval_expr(lhs.slice)]
-        T.buffer_store(self.eval_expr(lhs.value), rhs, indices)
-    else:
+    if not isinstance(lhs, doc.Subscript):
         self.eval_assign(target=lhs, source=rhs, bind_value=bind_assign_value)
+        return
+    buffer = self.eval_expr(lhs.value)
+    indices = self.eval_expr(lhs.slice)
+    buffer_op = buffer[indices]
+    if isinstance(buffer_op, tvm.tir.BufferLoad):
+        T.buffer_store(buffer_op.buffer, rhs, buffer_op.indices)
+    else:
+        T.buffer_region_store(buffer_op, rhs)
 
 
 @dispatch.register(token="tir", type_name="AnnAssign")

@@ -119,16 +119,12 @@ void CodeGenCUDA::PrintExtraAttrs(const PrimFunc& f, std::ostream& os) {
 
 std::string CodeGenCUDA::Finish() {
   if (enable_fp16_) {
-    decl_stream << "#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)\n";
     decl_stream << "#include <cuda_fp16.h>\n";
     decl_stream << "__device__ half max"
                 << "(half a, half b)\n"
                 << "{\n  return __hgt(__half(a), __half(b)) ? a : b;\n}\n";
     decl_stream << "__device__ half min(half a, half b)\n"
                 << "{\n  return __hlt(__half(a), __half(b)) ? a : b;\n}\n";
-    decl_stream << "#else\n";
-    decl_stream << _cuda_half_t_def;
-    decl_stream << "#endif\n\n";
     decl_stream << _cuda_half_util;
   }
 
@@ -171,15 +167,36 @@ std::string CodeGenCUDA::Finish() {
   }
 
   if (need_cast_smem_ptr_to_int_) {
-    decl_stream << "__forceinline__ __device__ unsigned int\n";
-    decl_stream << "cast_smem_ptr_to_int(const void* const smem_ptr)\n";
-    decl_stream << "{\n";
-    decl_stream << "  unsigned int smem_int;\n";
-    decl_stream << "  asm volatile (\"{ .reg .u64 smem_int; cvta.to.shared.u64 smem_int, %1; "
-                   "cvt.u32.u64 %0, smem_int; }\"\n";
-    decl_stream << "    : \"=r\"(smem_int) : \"l\"(smem_ptr));\n";
-    decl_stream << "  return smem_int;\n";
-    decl_stream << "}\n";
+    decl_stream <<
+        R"(// __cvta_generic_to_shared added in CUDA 11+
+#if __CUDACC_VER_MAJOR__ >= 11
+#define NVCC_SUPPORTS_CVTA_GENERIC_TO_SHARED 1
+#endif
+// __nvvm_get_smem_pointer added in CUDA 10.2
+#if __CUDACC_VER_MAJOR__ == 10 && __CUDACC_VER_MINOR__ >= 2
+#define NVCC_SUPPORTS_NVVM_GET_SMEM_POINTER 1
+#endif
+
+__forceinline__ __device__ unsigned int cast_smem_ptr_to_int(void const* const ptr) {
+  // We prefer to use the new CVTA intrinsics if they are available, otherwise we will fall back to
+  // the previous internal intrinsics if they are available.
+#if NVCC_SUPPORTS_CVTA_GENERIC_TO_SHARED
+  // This NVVM intrinsic converts an address in shared memory to a plain
+  // unsigned integer. This is necessary to pass to shared memory instructions
+  // in inline PTX.
+  // In CUDA 11 and beyond, this replaces __nvvm_get_smem_pointer()  [only available in 10.2].
+  //__device__ size_t __cvta_generic_to_shared(void* ptr);
+  return static_cast<unsigned int>(__cvta_generic_to_shared(ptr));
+#elif NVCC_SUPPORTS_NVVM_GET_SMEM_POINTER
+  return __nvvm_get_smem_pointer(ptr);
+#else
+  unsigned int smem_ptr;
+  asm("{.reg.u64 smem_ptr; cvta.to.shared.u64 smem_ptr, %1; cvt.u32.u64 %0, smem_ptr;}"
+      : "=r"(smem_ptr)
+      : "l"(ptr));
+  return smem_ptr;
+#endif
+  })";
   }
 
   decl_stream << "\n#if (((__CUDACC_VER_MAJOR__ == 11) && (__CUDACC_VER_MINOR__ >= 4)) || \\\n";
@@ -980,8 +997,8 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
     var_idmap_[inverse_index_map->initial_indices[1].get()] = "local_id";
 
     os << "for (int local_id = 0; local_id < 8; ++local_id) {\n";
-    os << dst << "[" + this->PrintExpr(dst_ind) + "]"
-       << " = " << src << "[" << src_offset << " + local_id];\n";
+    os << dst << "[" + this->PrintExpr(dst_ind) + "]" << " = " << src << "[" << src_offset
+       << " + local_id];\n";
     os << "}\n";
 
   } else if (op->op.same_as(builtin::mma_fill())) {

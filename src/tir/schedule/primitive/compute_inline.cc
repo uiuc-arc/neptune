@@ -850,45 +850,46 @@ class ReverseComputeInliner : public BaseInliner {
   arith::Analyzer analyzer_;
 };
 
-void ComputeInlineImpl(ScheduleState self, const StmtSRef& producer_block_sref,
-                       bool check_only = false) {
+std::pair<Stmt, Map<Block, Block>> ApplyInlineAndGenerateScopeRoot(
+    const ScheduleState& self, const StmtSRef& producer_block_sref,
+    const StmtSRef& scope_root_sref) {
   const BlockNode* _producer_block = TVM_SREF_TO_BLOCK(producer_block_sref);
   Block producer_block = GetRef<Block>(_producer_block);
   HasInitBlock::Check(self->mod, producer_block);
   Buffer inlined_buffer = NotSingleReadWriteBuffer::GetSingleWrite(self, producer_block);
-  // Step 1. Get the scope block
-  StmtSRef scope_root_sref = GetScopeRoot(self, producer_block_sref,
-                                          /*require_stage_pipeline=*/true);
-  // Step 2. Check completeness
+  // Step 1. Check completeness
   CheckNotOutputBlock(self, producer_block_sref, scope_root_sref);
   CheckCompleteBlock(self, producer_block_sref, scope_root_sref);
-  // Step 3. Analyze the block body
+  // Step 2. Analyze the block body
   ComputeInliner inliner(inlined_buffer, producer_block, scope_root_sref);
   if (!inliner.BodyPatternAllowInline(producer_block)) {
     throw BodyAnalysisError(false, self->mod, producer_block);
   }
-  // Step 4. Create a plan that removes the leaf block to be inlined
+  // Step 3. Create a plan that removes the leaf block to be inlined
   LeafBlockRemovalPlan(self, producer_block_sref, &inliner.src_stmt, &inliner.tgt_stmt);
-  // Step 5. Create an AST where the leaf `producer_block_sref` points to is removed,
+  // Step 4. Create an AST where the leaf `producer_block_sref` points to is removed,
   // and update other blocks who read from the removed block
   Stmt tgt_stmt = inliner(GetRef<Stmt>(scope_root_sref->stmt));
   if (inliner.has_opaque_access) {
     throw OpaqueAccessError(self->mod, scope_root_sref);
   }
-  // Step 6. Do the real mutation on the AST and the sref tree in the schedule state
-  if (check_only) {
-    return;
-  }
-  self->Replace(scope_root_sref, tgt_stmt, inliner.block_reuse);
+  return {tgt_stmt, inliner.block_reuse};
 }
 
 void ComputeInline(ScheduleState self, const StmtSRef& producer_block_sref) {
-  ComputeInlineImpl(self, producer_block_sref);
+  StmtSRef scope_root_sref = GetScopeRoot(self, producer_block_sref,
+                                          /*require_stage_pipeline=*/true);
+  auto [tgt_stmt, block_reuse] =
+      ApplyInlineAndGenerateScopeRoot(self, producer_block_sref, scope_root_sref);
+  // Do the real mutation on the AST and the sref tree in the schedule state
+  self->Replace(scope_root_sref, tgt_stmt, block_reuse);
 }
 
 bool CanComputeInline(const ScheduleState& self, const StmtSRef& producer_block_sref) {
   try {
-    ComputeInlineImpl(self, producer_block_sref, true);
+    StmtSRef scope_root_sref = GetScopeRoot(self, producer_block_sref,
+                                            /*require_stage_pipeline=*/true);
+    ApplyInlineAndGenerateScopeRoot(self, producer_block_sref, scope_root_sref);
   } catch (const tvm::runtime::Error& e) {
     return false;
   }

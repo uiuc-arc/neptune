@@ -22,6 +22,7 @@
  */
 
 #include <tvm/arith/iter_affine_map.h>
+#include <tvm/support/iterator.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
@@ -165,6 +166,12 @@ class BufferFlattener : public arith::IRMutatorWithAnalyzer {
     if (it != buffer_remap_.end()) {
       return it->second;
     }
+    // Upcast shape and strides to int64
+    auto buf_ptr = buf.CopyOnWrite();
+    auto ToI64 = [](PrimExpr e) { return cast(DataType::Int(64), e); };
+    buf_ptr->shape = support::map(buf_ptr->shape, ToI64).to_container<Array>();
+    buf_ptr->strides = support::map(buf_ptr->strides, ToI64).to_container<Array>();
+    // Then call GetFlattenedBuffer
     auto flattened = buf.GetFlattenedBuffer();
     auto writer = flattened.CopyOnWrite();
 

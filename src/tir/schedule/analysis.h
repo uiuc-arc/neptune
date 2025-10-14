@@ -431,7 +431,7 @@ struct ProducerConsumerSplit {
    * \throw ScheduleError is not valid split is found
    */
   static ProducerConsumerSplit Find(
-      const ScheduleState& state, const Array<Stmt>& subtrees,
+      const ScheduleState& state, const Stmt& root, const Stmt& loop_body,
       const Array<StmtSRef>& producer_block_srefs, const Array<StmtSRef>& consumer_block_srefs,
       std::unordered_map<const BlockNode*, const BlockRealizeNode*>* block2realize);
 };
@@ -483,6 +483,31 @@ std::pair<Optional<StmtSRef>, bool> GetBufferDefiningSite(const StmtSRef& block_
  */
 std::pair<Array<PrimExpr>, Array<BufferStore>> GetInitValuesAndUpdatesFromReductionBlock(
     const Optional<ScheduleState>& self, Block block);
+
+/*!
+ * \brief Describes a self-reduction: `lhs = reducer(lhs, rhs)`. Produced by `MatchSelfReduction`.
+ * \sa MatchSelfReduction
+ */
+struct SelfReductionMatchResult {
+  CommReducer reducer;
+  PrimExpr init_value;
+  BufferStore update;
+  BufferLoad lhs;
+  PrimExpr rhs;
+};
+
+/*!
+ * \brief Match the Block's i-th BufferStore against the pattern `LHS = f(LHS, RHS)` where `f` is a
+ * commutative reducer and `LHS` is a buffer access.
+ * \param self The schedule state, used for error reporting
+ * \param block The Block to be matched
+ * \param write_index The index of the write buffer to be matched. If given std::nullopt, we check
+ * that the block only has one write buffer.
+ * \note Any pattern non-match will throw an error.
+ * \return The match result: (reducer, store, LHS, RHS).
+ */
+SelfReductionMatchResult MatchSelfReduction(const Optional<ScheduleState>& self, const Block& block,
+                                            std::optional<size_t> write_index);
 
 /*!
  * \brief Check whether the input array of IterVars only contains data-parallel and reduction block
@@ -537,15 +562,21 @@ std::vector<runtime::TypedPackedFunc<Optional<CommReducer>(Array<PrimExpr>)>> Ge
 bool FromIdentityCombiner(const Array<PrimExpr>& identities, const Array<BufferStore>& combiners,
                           CommReducer* result_reducer, Array<PrimExpr>* lhs, Array<PrimExpr>* rhs);
 
-/******** Misc ********/
+/******** Compute Inline ********/
 
 /*!
- * \brief Check whether the input storage scope string is valid. Throw an error if not.
+ * \brief Apply inlining to the input block and regenerate the scope root.
  * \param self The schedule state
- * \param storage_scope The storage scope string to be checked
- * \throw ScheduleError If the input storage scope is not valid
+ * \param producer_block_sref The block to be inlined
+ * \param scope_root_sref The scope root of the producer block
+ * \return A pair: the regenerated scope root statement, and the block reuse map.
+ *         The block reuse map is a map from the original block to updated block.
+ * Throws an error if the inlining fails.
  */
-void CheckStorageScope(const ScheduleState& self, String storage_scope);
+
+std::pair<Stmt, Map<Block, Block>> ApplyInlineAndGenerateScopeRoot(
+    const ScheduleState& self, const StmtSRef& producer_block_sref,
+    const StmtSRef& scope_root_sref);
 
 /*!
  * \brief Checks if a block could be successfully computed inline into its consumer
@@ -562,6 +593,16 @@ bool CanComputeInline(const ScheduleState& self, const StmtSRef& block_sref);
  * \return A boolean indicating whether the block could be successfully computed inline
  */
 bool CanReverseComputeInline(const ScheduleState& self, const StmtSRef& block_sref);
+
+/******** Misc ********/
+
+/*!
+ * \brief Check whether the input storage scope string is valid. Throw an error if not.
+ * \param self The schedule state
+ * \param storage_scope The storage scope string to be checked
+ * \throw ScheduleError If the input storage scope is not valid
+ */
+void CheckStorageScope(const ScheduleState& self, String storage_scope);
 
 /*!
  * \brief Checks if a producer block could be successfully computed at the specific loop.
@@ -828,6 +869,17 @@ Optional<AutoTensorizeMappingInfo> GetAutoTensorizeMappingInfo(const ScheduleSta
  */
 bool CheckAutoTensorizeApplicable(const tir::Schedule& sch, const tir::BlockRV& block_rv,
                                   const tir::PrimFunc& desc_func);
+
+/******** Utilities for conditional bounds ********/
+
+enum class RelaxationMode {
+  kForAll,
+  kExists,
+};
+
+PrimExpr RelaxVarFromCondition(const PrimExpr& expr, const Map<Var, arith::IntSet>& dom_map,
+                               RelaxationMode mode);
+
 }  // namespace tir
 }  // namespace tvm
 

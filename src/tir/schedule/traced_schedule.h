@@ -109,7 +109,9 @@ class TracedScheduleNode : public ConcreteScheduleNode {
   void ReverseComputeInline(const BlockRV& block_rv) final;
   /******** Schedule: Reduction ********/
   BlockRV DecomposeReduction(const BlockRV& block_rv, const LoopRV& loop_rv) final;
-  BlockRV RFactor(const LoopRV& loop_rv, int factor_axis) final;
+  BlockRV RFactor(const LoopRV& loop_rv, int factor_axis, bool merge_loops = false) final;
+  BlockRV RollingUpdate(const BlockRV& block_rv, const LoopRV& loop_rv, int factor_axis) final;
+  BlockRV SplitKUpdate(const BlockRV& block_rv, const LoopRV& loop_rv, int factor_axis) final;
   /******** Schedule: Block annotation ********/
   void StorageAlign(const BlockRV& block_rv, int buffer_index, int axis, int factor,
                     int offset) final;
@@ -138,10 +140,17 @@ class TracedScheduleNode : public ConcreteScheduleNode {
   void PadEinsum(const BlockRV& block_rv, const Array<Integer>& padding) final;
   /******** Schedule: Buffer transformation ********/
   void RollingBuffer(const BlockRV& block_rv, int write_buffer_index) final;
+  Array<BlockRV> SplitScanBuffer(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                 int write_buffer_index) final;
   /******** Schedule: Misc ********/
   void EnterPostproc() final;
+  void PropagateIfThenElse(const BlockRV& block_rv, const LoopRV& loop_rv,
+                           String registered_handler) final;
   void UnsafeHideBufferAccess(const BlockRV& block_rv, const String& buf_type,
                               const Array<IntImm>& buf_index_array) final;
+  /******** Schedule: Function passes (buffer compactification, loop-tile conversion) ********/
+  void CompactBuffer() override;
+  void ToTileExprForm(const Array<LoopRV>& blockize_hints) override;
 };
 
 }  // namespace tir

@@ -271,6 +271,42 @@ class BufferStore : public Stmt {
   TVM_DEFINE_OBJECT_REF_COW_METHOD(BufferStoreNode);
 };
 
+class BufferRegionStoreNode : public StmtNode {
+ public:
+  BufferRegion region;
+  PrimExpr value;
+
+  BufferRegionStoreNode() = default;
+  BufferRegionStoreNode(BufferRegion region, PrimExpr value, Span span)
+      : StmtNode(span), region(region), value(value) {}
+
+  void VisitAttrs(AttrVisitor* v) {
+    v->Visit("region", &region);
+    v->Visit("value", &value);
+    v->Visit("span", &span);
+  }
+
+  bool SEqualReduce(const BufferRegionStoreNode* other, SEqualReducer equal) const {
+    return equal(region, other->region) && equal(value, other->value);
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(region);
+    hash_reduce(value);
+  }
+
+  static constexpr const char* _type_key = "tir.BufferRegionStore";
+  TVM_DECLARE_FINAL_OBJECT_INFO(BufferRegionStoreNode, StmtNode);
+};
+
+class BufferRegionStore : public Stmt {
+ public:
+  TVM_DLL BufferRegionStore(BufferRegion region, PrimExpr value, Span span = Span());
+
+  TVM_DEFINE_OBJECT_REF_METHODS(BufferRegionStore, Stmt, BufferRegionStoreNode);
+  TVM_DEFINE_OBJECT_REF_COW_METHOD(BufferRegionStoreNode);
+};
+
 /*!
  * \brief Annotate the region where the buffer need to
  *  be read and write in the body.
@@ -1130,63 +1166,6 @@ class Prefetch : public Stmt {
 };
 
 /*!
- * \brief Representing the region of multi-dimensional buffer access.
- */
-class BufferRegionNode : public Object {
- public:
-  /*! \brief The buffer of the buffer region. */
-  Buffer buffer;
-  /*! \brief The region array of the buffer region. */
-  Array<Range> region;
-
-  void VisitAttrs(AttrVisitor* v) {
-    v->Visit("buffer", &buffer);
-    v->Visit("region", &region);
-  }
-
-  bool SEqualReduce(const BufferRegionNode* other, SEqualReducer equal) const {
-    return equal(buffer, other->buffer) && equal(region, other->region);
-  }
-
-  void SHashReduce(SHashReducer hash_reduce) const {
-    hash_reduce(buffer);
-    hash_reduce(region);
-  }
-
-  static constexpr const char* _type_key = "tir.BufferRegion";
-  static constexpr const bool _type_has_method_sequal_reduce = true;
-  static constexpr const bool _type_has_method_shash_reduce = true;
-  TVM_DECLARE_FINAL_OBJECT_INFO(BufferRegionNode, Object);
-};
-
-/*!
- * \brief Managed reference to BufferRegionNode.
- * \sa BufferRegionNode
- */
-class BufferRegion : public ObjectRef {
- public:
-  TVM_DLL explicit BufferRegion(Buffer buffer, Array<Range> region);
-
-  /*!
-   * \brief Create a BufferRegion which is full region of the given buffer.
-   * \param buffer The buffer to generate full BufferRegion.
-   * \return The BufferRegion which covers all region of the given buffer
-   */
-  TVM_DLL static BufferRegion FullRegion(Buffer buffer);
-
-  /*!
-   * \brief Create a BufferRegion which is a single point of the given buffer.
-   * \param buffer The buffer to generate single point BufferRegion.
-   * \param indices The access point indices of the buffer
-   * \return The BufferRegion which is the single point of the given buffer.
-   */
-  TVM_DLL static BufferRegion FromPoint(Buffer buffer, Array<PrimExpr> indices);
-
-  TVM_DEFINE_OBJECT_REF_METHODS(BufferRegion, ObjectRef, BufferRegionNode);
-  TVM_DEFINE_OBJECT_REF_COW_METHOD(BufferRegionNode);
-};
-
-/*!
  * \brief Match introduces a constraint that the source buffer region can be remapped to the data
  * layout specified by the buffer field. The constraint can be checked in later part of lowering (or
  * optionally during runtime).
@@ -1663,6 +1642,38 @@ constexpr const char* warp_execution = "warp_execution";
 
 /*! \brief Mark that a block is disallowed in auto inline. */
 constexpr const char* meta_schedule_inline_rule = "meta_schedule.inline_rule";
+
+/*! \brief Mark that a block has been transformed from reduce to scan, and indicates which dim of
+ * the buffer is inserted in this process. */
+constexpr const char* tir_scan_buf_dim = "tir.scan_buffer_dim";
+
+/*!
+ * \brief Added to the rfactor and writeback blocks produced by the RFactor process in
+ * RollingUpdate and SplitKUpdate (the plain old TVM RFactor doesn't add it). It maps to an array
+ * with 3 entries: `[is_writeback, other_buffer, factor_axis]` where
+ * - `is_writeback` is a boolean indicating whether the block is the writeback block (other than
+ *   the rfactor block)
+ * - `other_buffer` is the buffer that updated by the other block (rfactor buffer on the writeback
+ *   block, or writeback buffer on the rfactor block)
+ * - `factor_axis` is the `factor_axis` used in the RFactor command
+ */
+constexpr const char* tir_rfactor_data = "tir.rfactor_data";
+
+//! \brief Mark that the function has been transformed to tile expression form.
+constexpr const char* tir_tile_expr_form = "tir.tile_expr_form";
+
+/*! \brief The original bounds of a loop. PropagateIfThenElse changes a loop's bound to some
+ * expression and then uses this annotation to communicate the original bounds, so that later passes
+ * (esp. when using `arith` tools) can figure out the range. */
+constexpr const char* tir_loop_original_bounds = "tir.loop_original_bounds";
+
+/*! \brief The number of warps to use for a block in Triton. Must start with "pragma_" to be kept
+ * after LowerOpaqueBlock. */
+constexpr const char* triton_num_warps = "pragma_triton_num_warps";
+
+/*! \brief The number of stages to use for a block in Triton. Must start with "pragma_" to be kept
+ * after LowerOpaqueBlock. */
+constexpr const char* triton_num_stages = "pragma_triton_num_stages";
 
 /*!
  * \brief Check if attr_key is a pragma key extension

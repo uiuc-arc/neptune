@@ -18,17 +18,17 @@
 import inspect
 from typing import Any
 from typing import Callable as _Callable
-from typing import Dict, List, Optional, Set, TypeVar, Union
+from typing import Dict, List, Optional, Sequence, Set, TypeVar, Union
 
 import tvm
 from tvm.relax import (
     Expr,
-    SeqExpr,
-    ShapeExpr,
     FuncStructInfo,
     Function,
     ObjectStructInfo,
     PrimStructInfo,
+    SeqExpr,
+    ShapeExpr,
     ShapeStructInfo,
     StructInfo,
     TensorStructInfo,
@@ -38,11 +38,11 @@ from tvm.relax.expr import Var
 from tvm.runtime import ObjectGeneric
 from tvm.tir import PrimExpr
 
+from ...ir_builder import relax as R
 from .._core import doc, parse, utils
 from ..core.entry import scan_macro
 from ..core.parser import Parser, ScriptMacro
 from ..ir import lookup_vdevice
-from ...ir_builder import relax as R
 
 FType = TypeVar("FType", bound=_Callable)
 
@@ -257,7 +257,7 @@ class TensorProxy(StructInfoProxy):
 
 
 def Tensor(
-    shape: Optional[Union[List[Union[PrimExpr, str]], Expr]] = None,
+    shape: Sequence[PrimExpr | int | str] | Expr | None = None,
     dtype: Optional[str] = None,
     vdevice: Optional[str] = None,
     ndim: int = -1,

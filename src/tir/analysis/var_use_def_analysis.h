@@ -68,6 +68,7 @@ class VarUseDefAnalyzer : public StmtExprVisitor {
   void VisitStmt_(const AllocateConstNode* op) final;
 
   void VisitStmt_(const BufferStoreNode* op) final;
+  void VisitStmt_(const BufferRegionStoreNode* op) final;
 
   void VisitExpr_(const LetNode* op) final;
 
@@ -76,6 +77,7 @@ class VarUseDefAnalyzer : public StmtExprVisitor {
   void VisitExpr_(const ReduceNode* op) final;
 
   void VisitExpr_(const BufferLoadNode* op) final;
+  void VisitExpr_(const BufferRegionNode* op) final;
 
   void HandleDef(const Var& v);
   void HandleUse(const Var& v);

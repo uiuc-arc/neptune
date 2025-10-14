@@ -15,8 +15,11 @@
 # specific language governing permissions and limitations
 # under the License.
 """Runner utility functions"""
+
 import itertools
 from typing import Any, Callable, Dict, List
+
+from tvm._ffi.runtime_ctypes import DataType, DataTypeCode
 
 from ...runtime import Device, Module, ndarray
 from .config import EvaluatorConfig
@@ -25,6 +28,8 @@ T_ARG_INFO_JSON_OBJ = List[Any]  # pylint: disable=invalid-name
 T_ARG_INFO_JSON_OBJ_LIST = List[T_ARG_INFO_JSON_OBJ]  # pylint: disable=invalid-name
 T_ARGUMENT = Any  # pylint: disable=invalid-name
 T_ARGUMENT_LIST = List[T_ARGUMENT]  # pylint: disable=invalid-name
+
+DTYPE_TO_NP_DTYPE = {v: k for k, v in DataType.NUMPY2STR.items()}
 
 
 def alloc_argument_common(
@@ -57,11 +62,20 @@ def alloc_argument_common(
         f_random_fill(arg)
         return arg
 
+    def random_scalar(_, dtype: str):
+        import numpy as np
+
+        dtype_ = DataType(dtype)
+        if dtype_.type_code == DataTypeCode.FLOAT:
+            return np.random.randn(1).astype(DTYPE_TO_NP_DTYPE[dtype])[0]
+        raise NotImplementedError(f"Unsupported dtype: {dtype}")
+
     def alloc_fail(*arg_info) -> None:
         raise NotImplementedError(arg_info)
 
     dispatcher: Dict[Any, Callable] = {
         "TENSOR": alloc_tensor,
+        "SCALAR": random_scalar,
         None: alloc_fail,
     }
 
@@ -71,8 +85,9 @@ def alloc_argument_common(
         arg_info: T_ARG_INFO_JSON_OBJ
         for arg_info in args_info:
             arg_type = arg_info[0]
-            arg: Any = dispatcher.get(arg_type, None)(*arg_info)
-            args.append(arg)
+            if (disp_f := dispatcher.get(arg_type)) is None:
+                raise NotImplementedError(f"Unsupported argument type: {arg_type}")
+            args.append(disp_f(*arg_info))
         repeated_args.append(args)
     return repeated_args
 
@@ -101,15 +116,20 @@ def run_evaluator_common(
     costs: List[float]
         The evaluator results
     """
+    f_preproc = ""
+    device_type = Device.MASK2STR[device.device_type]
+    if evaluator_config.enable_cache_flush:
+        if device_type == "cuda":
+            f_preproc = "l2_cache_flush_cuda"
+        elif device_type == "cpu":
+            f_preproc = "cache_flush_cpu_non_first_arg"
     evaluator = rt_mod.time_evaluator(
         func_name=rt_mod.entry_name,
         dev=device,
         number=evaluator_config.number,
         repeat=evaluator_config.repeat,
         min_repeat_ms=evaluator_config.min_repeat_ms,
-        f_preproc="cache_flush_cpu_non_first_arg"
-        if evaluator_config.enable_cpu_cache_flush
-        else "",
+        f_preproc=f_preproc,
     )
     repeated_costs: List[List[float]] = []
     for args in repeated_args:

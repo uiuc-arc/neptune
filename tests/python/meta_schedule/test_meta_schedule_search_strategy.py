@@ -14,7 +14,8 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-""" Test Meta Schedule SearchStrategy """
+"""Test Meta Schedule SearchStrategy"""
+
 # pylint: disable=missing-function-docstring
 from typing import List
 
@@ -22,8 +23,8 @@ import pytest
 import tvm
 import tvm.testing
 from tvm import meta_schedule as ms
-from tvm.meta_schedule.utils import derived_object
 from tvm.meta_schedule.testing.dummy_object import DummyMutator
+from tvm.meta_schedule.utils import derived_object
 from tvm.script import tir as T
 from tvm.tir.schedule import Schedule, Trace
 
@@ -138,7 +139,6 @@ def test_meta_schedule_evolutionary_search():  # pylint: disable = invalid-name
         mod=Matmul,
         space_generator=ms.space_generator.ScheduleFn(
             sch_fn=_schedule_matmul_small,
-            sch_rules=[],
             postprocs=[],
             mutator_probs={
                 DummyMutator(): 1.0,
@@ -212,7 +212,6 @@ def test_meta_schedule_evolutionary_search_early_stop():  # pylint: disable = in
         ),
         space_generator=ms.space_generator.ScheduleFn(
             sch_fn=_schedule_matmul_empty,
-            sch_rules=[],
             postprocs=[],
             mutator_probs={
                 DummyMutator(): 1.0,
@@ -276,7 +275,6 @@ def test_meta_schedule_evolutionary_search_fail_init_population():  # pylint: di
         mod=Matmul,
         space_generator=ms.space_generator.ScheduleFn(
             sch_fn=_schedule_matmul,
-            sch_rules=[],
             postprocs=[AlwaysFailPostproc()],
             mutator_probs={
                 DummyMutator(): 1.0,

@@ -36,12 +36,8 @@
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/var.h>
 
-#include <algorithm>
-#include <iostream>
-#include <limits>
 #include <string>
 #include <unordered_map>
-#include <utility>
 
 namespace tvm {
 namespace tir {
@@ -683,6 +679,106 @@ class BufferLoad : public PrimExpr {
                               Optional<PrimExpr> predicate = NullOpt, Span span = Span());
   TVM_DEFINE_OBJECT_REF_METHODS(BufferLoad, PrimExpr, BufferLoadNode);
   TVM_DEFINE_OBJECT_REF_COW_METHOD(BufferLoadNode);
+};
+
+// A bit awkward of a type to represent (PrimExpr | Range | NullOpt).
+using ExprOrRangeOrNull = Optional<Variant<PrimExpr, Range>>;
+
+/*!
+ * \brief Representing the region of multi-dimensional buffer access.
+ */
+class BufferRegionNode : public PrimExprNode {
+ public:
+  /*! \brief The buffer of the buffer region. */
+  Buffer buffer;
+  /*! \brief The region array of the buffer region. */
+  Array<Range> region;
+  /*! \brief A mapping from output dimensions (the dimensions of the region) to input dimensions
+   * (the dimensions of the buffer).
+   *
+   * If `output_to_input_dims[i] = k`, it means the `i`-th dimension of the region comes from
+   * the `k`-th dimension of the buffer.
+   * If `output_to_input_dims[i] = NullOpt`, it means the `i`-th dimension of the region is
+   * a new dimension created by unsqueezing.
+   * If a dimension `k` is not in `output_to_input_dims`, it means the `region[k]` is squeezed away,
+   * which requires `region[k].extent == 1` (we'll check for that in the constructor).
+   *
+   * output_to_input_dims must be monotonically increasing -- no dim permutation is allowed.
+   */
+  Array<Optional<Integer>> output_to_input_dims;
+
+  void VisitAttrs(AttrVisitor* v) {
+    v->Visit("buffer", &buffer);
+    v->Visit("region", &region);
+    v->Visit("output_to_input_dims", &output_to_input_dims);
+    v->Visit("dtype", &dtype);
+    v->Visit("span", &span);
+  }
+
+  bool SEqualReduce(const BufferRegionNode* other, SEqualReducer equal) const {
+    // `dtype` of `BufferRegion` is dummy and same as `buffer->dtype`, so we don't compare (or hash)
+    // it.
+    return equal(buffer, other->buffer) && equal(region, other->region) &&
+           equal(output_to_input_dims, other->output_to_input_dims);
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(buffer);
+    hash_reduce(region);
+    hash_reduce(output_to_input_dims);
+  }
+
+  /*!
+   * \brief Check if the BufferRegion is full region of the given buffer, requiring the region
+   * covers the whole buffer and no unsqueezing happens.
+   */
+  bool IsFullRegion() const;
+
+  /*!
+   * \brief Check if the BufferRegion is only an unsqueezed version of the entire buffer region.
+   */
+  std::optional<std::vector<bool>> AsUnsqueezeOnly() const;
+
+  /*!
+   * \brief Incorporate `output_to_input_dims` into `region` to produce a list of indices
+   * so that applying these indices on the buffer produces the same region as `this`.
+   */
+  Array<ExprOrRangeOrNull> ConvertToIndices() const;
+
+  static constexpr const char* _type_key = "tir.BufferRegion";
+  static constexpr const bool _type_has_method_sequal_reduce = true;
+  static constexpr const bool _type_has_method_shash_reduce = true;
+  TVM_DECLARE_FINAL_OBJECT_INFO(BufferRegionNode, PrimExprNode);
+};
+
+/*!
+ * \brief Managed reference to BufferRegionNode.
+ * \sa BufferRegionNode
+ */
+class BufferRegion : public PrimExpr {
+ public:
+  TVM_DLL explicit BufferRegion(Buffer buffer, Array<Range> region);
+
+  TVM_DLL explicit BufferRegion(Buffer buffer, Array<Range> region,
+                                Array<Optional<Integer>> output_to_input_dims, Span span = Span());
+
+  /*!
+   * \brief Create a BufferRegion which is full region of the given buffer.
+   * \param buffer The buffer to generate full BufferRegion.
+   * \return The BufferRegion which covers all region of the given buffer
+   */
+  TVM_DLL static BufferRegion FullRegion(Buffer buffer);
+
+  /*!
+   * \brief Create a BufferRegion which is a single point of the given buffer.
+   * \param buffer The buffer to generate single point BufferRegion.
+   * \param indices The access point indices of the buffer
+   * \return The BufferRegion which is the single point of the given buffer.
+   */
+  TVM_DLL static BufferRegion FromPoint(Buffer buffer, Array<PrimExpr> indices);
+
+  TVM_DEFINE_OBJECT_REF_METHODS(BufferRegion, PrimExpr, BufferRegionNode);
+  TVM_DEFINE_OBJECT_REF_COW_METHOD(BufferRegionNode);
 };
 
 /*!

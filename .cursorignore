@@ -1,0 +1,12 @@
+build*/
+3rdparty/
+apps/
+ci/
+cmake/
+conda/
+golang/
+jvm/
+logs/
+rust/
+vta/
+web/

@@ -87,10 +87,14 @@ void Dump(const runtime::ObjectRef& n) { std::cerr << n << "\n"; }
 
 void Dump(const runtime::Object* n) { Dump(runtime::GetRef<runtime::ObjectRef>(n)); }
 
-TVM_REGISTER_GLOBAL("node.AsRepr").set_body_typed([](runtime::ObjectRef obj) {
+std::string AsRepr(const runtime::ObjectRef& node) {
   std::ostringstream os;
-  os << obj;
+  os << node;
   return os.str();
+}
+
+TVM_REGISTER_GLOBAL("node.AsRepr").set_body_typed([](runtime::ObjectRef obj) {
+  return AsRepr(obj);
 });
 
 TVM_REGISTER_GLOBAL("node.AsLegacyRepr").set_body_typed(runtime::AsLegacyRepr);

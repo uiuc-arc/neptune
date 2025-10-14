@@ -167,6 +167,14 @@ class ROCMWrappedFunc {
     hipStream_t strm = static_cast<hipStream_t>(ROCMThreadEntry::ThreadLocal()->stream);
 
     ThreadWorkLoad wl = launch_param_config_.Extract(args);
+    if (wl.dyn_shmem_size >= (48 << 10)) {
+      hipError_t result = hipFuncSetAttribute(
+          fcache_[device_id], hipFuncAttributeMaxDynamicSharedMemorySize, wl.dyn_shmem_size);
+      if (result != hipSuccess) {
+        LOG(FATAL) << "Failed to set the allowed dynamic shared memory size to "
+                    << wl.dyn_shmem_size;
+      }
+    }
     void* config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, packed_args, HIP_LAUNCH_PARAM_BUFFER_SIZE,
                       &packed_nbytes, HIP_LAUNCH_PARAM_END};
     // HIP supports only extra_args.

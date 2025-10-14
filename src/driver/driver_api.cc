@@ -517,12 +517,21 @@ runtime::Module TIRToRuntime(const Map<Target, IRModule>& inputs_arg,
   }
 
   runtime::Module mhost = codegen::Build(mhost_all, target_host);
+
+  // Import external modules defined in the attributes as `external_mods`
+  Array<runtime::Module> external_mods =
+      mhost_all->attrs.GetAttr<Array<runtime::Module>>("external_mods").value_or({});
+  for (auto mod : external_mods) {
+    if (mod.operator->()) {
+      mhost.Import(mod);
+    }
+  }
+  // Import device modules
   for (const auto& it : device_modules) {
     if (it.operator->()) {
       mhost.Import(it);
     }
   }
-
   return mhost;
 }
 

@@ -88,15 +88,13 @@ class VarNode : public PrimExprNode {
 /*! \brief a named variable in TIR */
 class Var : public PrimExpr {
  public:
-  explicit Var(ObjectPtr<Object> n) : PrimExpr(n) {}
   /*!
    * \brief Constructor
    * \param name_hint variable name
    * \param dtype data type
    * \param span The location of this object in the source code.
    */
-  TVM_DLL explicit Var(String name_hint = "v", DataType dtype = DataType::Int(32),
-                       Span span = Span());
+  TVM_DLL explicit Var(String name_hint, DataType dtype = DataType::Int(32), Span span = Span());
   /*!
    * \brief Constructor which provides a more detailed type annotation.
    * \param name_hint variable name.
@@ -123,18 +121,7 @@ class Var : public PrimExpr {
    */
   TVM_DLL Var copy_with_dtype(DataType dtype) const;
 
-  /*!
-   * \brief Get pointer to the internal value.
-   * \return the corresponding Variable.
-   */
-  const VarNode* operator->() const { return get(); }
-  /*!
-   * \brief Get pointer to the internal value.
-   * \return the corresponding Variable.
-   */
-  const VarNode* get() const { return static_cast<const VarNode*>(data_.get()); }
-  /*! \brief type indicate the container type */
-  using ContainerType = VarNode;
+  TVM_DEFINE_OBJECT_REF_METHODS(Var, PrimExpr, VarNode);
 };
 
 /*!

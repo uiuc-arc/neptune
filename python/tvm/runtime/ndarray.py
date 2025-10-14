@@ -16,6 +16,7 @@
 # under the License.
 # pylint: disable=invalid-name, unused-import, redefined-outer-name
 """Runtime NDArray API"""
+
 import ctypes
 import warnings
 from typing import Optional
@@ -59,6 +60,65 @@ except (RuntimeError, ImportError) as error:
         _make_array,
         _set_class_ndarray,
     )
+
+
+# Get the dtype and shape of an array-like object.
+# Works for NDArray, np.ndarray, torch tensors (if torch is installed),
+# and any other object that can be converted to a numpy array.
+def get_info_of_array_like(arr) -> tuple[str, tuple[int, ...]]:
+    if isinstance(arr, NDArrayBase):
+        return arr.dtype, arr.shape
+    if isinstance(arr, np.ndarray):
+        numpy_str_map = DataType.NUMPY2STR
+        dtype = numpy_str_map.get(arr.dtype, str(arr.dtype))
+        return dtype, arr.shape
+    # Try PyTorch
+    try:
+        import torch
+
+        if isinstance(arr, torch.Tensor):
+            dtype = DataType.from_torch_dtype(arr.dtype, torch)
+            return str(dtype), arr.shape
+    except ImportError:
+        pass
+    # Try forcing a conversion to a numpy array
+    try:
+        arr = np.array(arr)
+    except Exception as e:
+        raise TypeError(f"Unsupported array type: {type(arr)}") from e
+    return get_info_of_array_like(arr)
+
+
+# Get the pointer and size of an array-like object.
+# Works for np.ndarray, torch tensors (if torch is installed),
+# and any other object that can be converted to a numpy array.
+# Does NOT work for NDArray.
+def get_ptr_of_array_like(arr):
+    if isinstance(arr, np.ndarray):
+        if not arr.flags["C_CONTIGUOUS"]:
+            arr = np.ascontiguousarray(arr)
+        assert arr.flags["C_CONTIGUOUS"]
+        data = arr.ctypes.data_as(ctypes.c_void_p)
+        nbytes = ctypes.c_size_t(arr.size * arr.dtype.itemsize)
+        return data, nbytes
+    try:
+        import torch
+
+        if isinstance(arr, torch.Tensor):
+            if not arr.is_contiguous():
+                arr = arr.contiguous()
+            if arr.device.type != "cpu":
+                arr = arr.cpu()
+            data = ctypes.c_void_p(arr.data_ptr())
+            nbytes = ctypes.c_size_t(arr.numel() * arr.element_size())
+            return data, nbytes
+    except ImportError:
+        pass
+    try:
+        arr = np.array(arr)
+    except Exception as e:
+        raise TypeError(f"Unsupported array type: {type(arr)}") from e
+    return get_ptr_of_array_like(arr)
 
 
 @tvm._ffi.register_object("runtime.NDArray")
@@ -163,45 +223,22 @@ class NDArray(NDArrayBase):
         if isinstance(source_array, NDArrayBase):
             source_array.copyto(self)
             return self
-
-        if not isinstance(source_array, np.ndarray):
-            try:
-                source_array = np.array(source_array, dtype=self.dtype)
-            except:
-                raise TypeError(
-                    f"array must be an array_like data, type {type(source_array)} is not supported"
-                )
-
-        t = DataType(self.dtype)
-        shape, dtype = self.shape, self.dtype
-        if t.lanes > 1:
-            shape = shape + (t.lanes,)
-            t.lanes = 1
-            dtype = str(t)
-
-        if source_array.shape != shape:
-            raise ValueError(
-                f"array shape do not match the shape of NDArray {source_array.shape} vs {shape}"
-            )
-        numpy_str_map = DataType.NUMPY2STR
-        np_dtype_str = (
-            numpy_str_map[source_array.dtype]
-            if source_array.dtype in numpy_str_map
-            else str(source_array.dtype)
-        )
-        if (not source_array.flags["C_CONTIGUOUS"]) or (
-            dtype == "bfloat16" or dtype != np_dtype_str
-        ):
-            if dtype == "bfloat16":
-                source_array = np.frombuffer(source_array.tobytes(), "uint16")
-            source_array = np.ascontiguousarray(
-                source_array, dtype="uint16" if dtype == "bfloat16" else dtype
-            )
-        assert source_array.flags["C_CONTIGUOUS"]
-        data = source_array.ctypes.data_as(ctypes.c_void_p)
-        nbytes = ctypes.c_size_t(source_array.size * source_array.dtype.itemsize)
+        src_dtype, src_shape = get_info_of_array_like(source_array)
+        self._check_dtype_and_shape(src_dtype, src_shape)
+        data, nbytes = get_ptr_of_array_like(source_array)
         check_call(_LIB.TVMArrayCopyFromBytes(self.handle, data, nbytes))
         return self
+
+    def _check_dtype_and_shape(self, src_dtype, src_shape):
+        shape, dtype = self.shape, self.dtype
+        if (t := DataType(self.dtype)).lanes > 1:  # type: ignore
+            shape = self.shape + (t.lanes,)
+            t.lanes = 1
+            dtype = str(t)
+        if src_shape != shape:
+            raise ValueError(f"self shape ({shape}) does not match the shape of input: {src_shape}")
+        if dtype != src_dtype:
+            raise ValueError(f"self dtype ({dtype}) does not match the dtype of input: {src_dtype}")
 
     def __repr__(self):
         res = f"<tvm.nd.NDArray shape={self.shape}, {self.device}>\n"
@@ -653,8 +690,9 @@ def array(arr, device=cpu(0), mem_scope=None):
 
     Parameters
     ----------
-    arr : numpy.ndarray
-        The array to be copied from
+    arr : numpy.ndarray | torch.Tensor
+        The array to be copied from. Must be ndarray, torch.Tensor,
+        or convertible to a numpy array.
 
     device : Device, optional
         The device to create the array
@@ -670,9 +708,8 @@ def array(arr, device=cpu(0), mem_scope=None):
     if isinstance(arr, tvm.ir.container.Array):
         raise AttributeError("arr is an instance of", type(arr))
 
-    if not isinstance(arr, (np.ndarray, NDArray)):
-        arr = np.array(arr)
-    return empty(arr.shape, arr.dtype, device, mem_scope).copyfrom(arr)
+    dtype, shape = get_info_of_array_like(arr)
+    return empty(shape, dtype, device, mem_scope).copyfrom(arr)
 
 
 # Register back to FFI

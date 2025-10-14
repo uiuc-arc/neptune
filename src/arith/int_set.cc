@@ -71,11 +71,11 @@ IntervalSet Intersect(Analyzer* analyzer, IntervalSet a, IntervalSet b) {
   }
 }
 
-IntervalSet Union(Analyzer* analyzer, IntervalSet a, IntervalSet b) {
+IntervalSet Union(Analyzer& analyzer, IntervalSet a, IntervalSet b) {
   if (a->IsEmpty()) return b;
   if (b->IsEmpty()) return a;
-  PrimExpr max_value = max(a->max_value, b->max_value);
-  PrimExpr min_value = min(a->min_value, b->min_value);
+  PrimExpr max_value = analyzer.Simplify(max(a->max_value, b->max_value));
+  PrimExpr min_value = analyzer.Simplify(min(a->min_value, b->min_value));
   return IntervalSet(min_value, max_value);
 }
 
@@ -497,7 +497,7 @@ class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const PrimExpr&)> {
   IntervalSet VisitExpr_(const SelectNode* op) final {
     IntervalSet true_set = this->Eval(op->true_value);
     IntervalSet false_set = this->Eval(op->false_value);
-    return Union(analyzer_, false_set, true_set);
+    return Union(*analyzer_, false_set, true_set);
   }
 
   IntervalSet VisitExpr_(const CastNode* op) final {
@@ -855,18 +855,38 @@ bool IntSet::MatchRange(const Range& b) const {
          ProveEqual(&ana, a_int->max_value, b->extent + b->min - 1);
 }
 
-IntSet Union(const Array<IntSet>& sets) {
+class AnalyzerGuard {
+ public:
+  explicit AnalyzerGuard(Analyzer* analyzer) : is_allocated_(analyzer == nullptr) {
+    analyzer_ = is_allocated_ ? new Analyzer() : analyzer;
+  }
+
+  ~AnalyzerGuard() {
+    if (is_allocated_) {
+      delete analyzer_;
+    }
+  }
+
+  Analyzer* operator->() { return analyzer_; }
+  Analyzer& operator*() { return *analyzer_; }
+
+ private:
+  Analyzer* analyzer_;
+  bool is_allocated_;
+};
+
+IntSet Union(const Array<IntSet>& sets, Analyzer* analyzer) {
   if (sets.size() == 0) return IntSet::Nothing();
   if (sets.size() == 1) return sets[0];
-  Analyzer ana;
+  AnalyzerGuard ana(analyzer);
   IntervalSet x = ToIntervalSet(sets[0]);
   for (size_t i = 1; i < sets.size(); ++i) {
-    x = Union(&ana, x, ToIntervalSet(sets[i]));
+    x = Union(*ana, x, ToIntervalSet(sets[i]));
   }
-  return IntervalSet(ana.Simplify(x->min_value), ana.Simplify(x->max_value));
+  return IntervalSet(ana->Simplify(x->min_value), ana->Simplify(x->max_value));
 }
 
-Array<IntSet> UnionRegion(const Array<Array<IntSet>>& nd_int_sets) {
+Array<IntSet> UnionRegion(const Array<Array<IntSet>>& nd_int_sets, Analyzer* analyzer) {
   if (nd_int_sets.empty()) {
     return {};
   }
@@ -880,7 +900,7 @@ Array<IntSet> UnionRegion(const Array<Array<IntSet>>& nd_int_sets) {
     for (int j = 0; j < n; ++j) {
       candidates.push_back(nd_int_sets[j][i]);
     }
-    result.push_back(Union(candidates));
+    result.push_back(Union(candidates, analyzer));
   }
   return result;
 }

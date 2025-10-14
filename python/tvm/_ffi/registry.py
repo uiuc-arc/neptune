@@ -17,28 +17,49 @@
 
 # pylint: disable=invalid-name, unused-import
 """FFI registry to register function and objects."""
-import sys
-import ctypes
 
-from .base import _LIB, check_call, py_str, c_str, string_types, _FFI_MODE, _RUNTIME_ONLY
+import ctypes
+import sys
+from collections.abc import Callable
+from typing import Literal, overload
+
+from .base import _FFI_MODE, _LIB, _RUNTIME_ONLY, c_str, check_call, py_str
 
 try:
     # pylint: disable=wrong-import-position,unused-import
     if _FFI_MODE == "ctypes":
         raise ImportError()
-    from ._cy3.core import _register_object, _get_object_type_index
-    from ._cy3.core import _reg_extension
-    from ._cy3.core import convert_to_tvm_func, _get_global_func, PackedFuncBase
+    from ._cy3.core import (
+        ObjectBase,
+        PackedFuncBase,
+        _get_global_func,
+        _get_object_type_index,
+        _reg_extension,
+        _register_object,
+        convert_to_tvm_func,
+    )
 except (RuntimeError, ImportError) as error:
     # pylint: disable=wrong-import-position,unused-import
     if _FFI_MODE == "cython":
         raise error
-    from ._ctypes.object import _register_object, _get_object_type_index
     from ._ctypes.ndarray import _reg_extension
-    from ._ctypes.packed_func import convert_to_tvm_func, _get_global_func, PackedFuncBase
+    from ._ctypes.object import ObjectBase, _get_object_type_index, _register_object
+    from ._ctypes.packed_func import (
+        PackedFuncBase,
+        _get_global_func,
+        convert_to_tvm_func,
+    )
 
 
-def register_object(type_key=None):
+@overload
+def register_object(type_key: type) -> ObjectBase: ...
+
+
+@overload
+def register_object(type_key: str) -> Callable[[ObjectBase], ObjectBase]: ...
+
+
+def register_object(type_key):
     """register object type.
 
     Parameters
@@ -59,11 +80,9 @@ def register_object(type_key=None):
     """
     object_name = type_key if isinstance(type_key, str) else type_key.__name__
 
-    def register(cls):
+    def register(cls: ObjectBase) -> ObjectBase:
         """internal register function"""
-        if hasattr(cls, "_type_index"):
-            tindex = cls._type_index
-        else:
+        if (tindex := getattr(cls, "_type_index", None)) is None:
             tidx = ctypes.c_uint()
             if not _RUNTIME_ONLY:
                 check_call(_LIB.TVMObjectTypeKey2Index(c_str(object_name), ctypes.byref(tidx)))
@@ -213,6 +232,14 @@ def register_func(func_name, f=None, override=False):
     if f:
         return register(f)
     return register
+
+
+@overload
+def get_global_func(name: str, allow_missing: Literal[True]) -> Callable | None: ...
+
+
+@overload
+def get_global_func(name: str, allow_missing: Literal[False] = False) -> Callable: ...
 
 
 def get_global_func(name, allow_missing=False):

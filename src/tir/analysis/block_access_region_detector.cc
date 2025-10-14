@@ -39,8 +39,9 @@ namespace tir {
  */
 class BlockReadWriteDetector : public StmtExprVisitor {
  public:
-  explicit BlockReadWriteDetector(const Map<Var, Buffer>& buffer_var_map)
-      : buffer_var_map_(buffer_var_map) {}
+  explicit BlockReadWriteDetector(Map<Var, Buffer> buffer_var_map, bool require_found_in_buffer_map)
+      : buffer_var_map_(std::move(buffer_var_map)),
+        require_found_in_buffer_map_(require_found_in_buffer_map) {}
 
   /*! \brief Return read regions of the block */
   Array<BufferRegion> CollectReads(
@@ -84,6 +85,8 @@ class BlockReadWriteDetector : public StmtExprVisitor {
   std::unordered_map<const VarNode*, PrimExpr> let_bindings_;
   /*!\ brief Internal analyzer. */
   arith::Analyzer ana_;
+  /*! \brief Whether the buffer must be found in the buffer map for the update to happen. */
+  bool require_found_in_buffer_map_;
 
   /*!
    * \brief Update read/write buffers and regions with provided buffer and region
@@ -297,7 +300,8 @@ std::vector<arith::IntSet> BlockReadWriteDetector::ConvertMatchedRegion(
 void BlockReadWriteDetector::Update(std::vector<Buffer>* buffers,
                                     std::vector<std::vector<arith::IntSet>>* regions, Buffer buffer,
                                     std::vector<arith::IntSet> region) {
-  if (buffer_var_map_.find(buffer->data) == buffer_var_map_.end()) return;
+  if (require_found_in_buffer_map_ && buffer_var_map_.find(buffer->data) == buffer_var_map_.end())
+    return;
   // Handle match_buffer remap
   auto it = match_buffers_.find(buffer->data.get());
   if (it != match_buffers_.end()) {
@@ -364,7 +368,7 @@ void BlockReadWriteDetector::UpdateOpaque(const Var& buffer_var) {
 
 Array<Array<BufferRegion>> GetBlockAccessRegion(const Block& block,
                                                 const Map<Var, Buffer>& buffer_var_map) {
-  BlockReadWriteDetector detector(buffer_var_map);
+  BlockReadWriteDetector detector(buffer_var_map, /*require_found_in_buffer_map=*/true);
   detector(block);
   Array<BufferRegion> writes = detector.CollectWrites();
   std::unordered_set<const BufferNode*> excluded_buffers;
@@ -379,9 +383,9 @@ Array<Array<BufferRegion>> GetBlockAccessRegion(const Block& block,
   return {reads, writes, opaques};
 }
 
-Array<Array<BufferRegion>> GetBlockReadWriteRegion(const Block& block,
-                                                   const Map<Var, Buffer>& buffer_var_map) {
-  BlockReadWriteDetector detector(buffer_var_map);
+std::pair<Array<BufferRegion>, Array<BufferRegion>> _GetBlockReadWriteRegion(
+    const Block& block, Map<Var, Buffer> buffer_var_map, bool require_found_in_buffer_map) {
+  BlockReadWriteDetector detector(std::move(buffer_var_map), require_found_in_buffer_map);
   detector(block);
   Array<BufferRegion> opaques = detector.CollectOpaques();
   std::unordered_set<const BufferNode*> excluded_buffers;
@@ -402,8 +406,24 @@ Array<Array<BufferRegion>> GetBlockReadWriteRegion(const Block& block,
   return {reads, writes};
 }
 
+Array<Array<BufferRegion>> GetBlockReadWriteRegion(const Block& block,
+                                                   const Map<Var, Buffer>& buffer_var_map) {
+  auto [reads, writes] =
+      _GetBlockReadWriteRegion(block, buffer_var_map, /*require_found_in_buffer_map=*/true);
+  return {reads, writes};
+}
+
+std::pair<Array<BufferRegion>, Array<BufferRegion>> GetBlockReadWriteRegion(const Block& block) {
+  Map<Var, Buffer> buffer_var_map;
+  return _GetBlockReadWriteRegion(block, std::move(buffer_var_map),
+                                  /*require_found_in_buffer_map=*/false);
+}
+
 TVM_REGISTER_GLOBAL("tir.analysis.GetBlockAccessRegion").set_body_typed(GetBlockAccessRegion);
-TVM_REGISTER_GLOBAL("tir.analysis.GetBlockReadWriteRegion").set_body_typed(GetBlockReadWriteRegion);
+TVM_REGISTER_GLOBAL("tir.analysis.GetBlockReadWriteRegion")
+    .set_body_typed([](const Block& block, const Map<Var, Buffer>& buffer_var_map) {
+      return GetBlockReadWriteRegion(block, buffer_var_map);
+    });
 
 }  // namespace tir
 }  // namespace tvm

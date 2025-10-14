@@ -24,16 +24,38 @@
 #ifndef TVM_TIR_TRANSFORM_H_
 #define TVM_TIR_TRANSFORM_H_
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/ir/transform.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/function.h>
 
-#include <string>
-#include <vector>
-
 namespace tvm {
 namespace tir {
+
+struct BlockMap;
+
+/*!
+ * \brief Locate the buffer allocation to the exact position (usually is
+ * the lca of buffer access). This function will inject opaque block
+ * with alloc_buffers at the allocation site.
+ */
+PrimFunc PlanAndUpdateBufferAllocationLocation(PrimFunc func, BlockMap* block_map = nullptr);
+
+/*!
+ * \brief Compact the buffer access region by removing the buffer regions that are not accessed,
+ * i.e. narrowing the buffer shape and adjust the access region if necessary. Applies the
+ * same behavior as the tir.transform.CompactBufferAllocation pass.
+ */
+PrimFunc CompactBufferAllocation(PrimFunc func, bool remove_trivial_dims = false,
+                                 bool is_strict = true, BlockMap* block_map = nullptr);
+
+/*!
+ * \brief Simplifies the prim func.
+ * Applies the same behavior as the tir.transform.Simplify pass.
+ */
+PrimFunc Simplify(PrimFunc stmt, arith::Analyzer* analyzer, BlockMap* block_map = nullptr);
+
 namespace transform {
 
 using tvm::transform::Pass;
@@ -533,9 +555,10 @@ TVM_DLL Pass LiftThreadBinding();
  *
  * \param is_strict ensure the compacted shape always smaller than the original shape.
  *   otherwise it allows to grow the shape to match actual accessed buffer regions.
+ * \param remove_trivial_dims remove dimensions that become trivial (1) after compacting.
  * \return The pass.
  */
-TVM_DLL Pass CompactBufferAllocation(bool is_strict = true);
+TVM_DLL Pass CompactBufferAllocation(bool is_strict = true, bool remove_trivial_dims = false);
 
 /*!
  * This pass legalizes packed calls by wrapping their arguments into TVMValues

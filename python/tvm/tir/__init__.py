@@ -26,11 +26,12 @@ from .expr import Var, SizeVar, Reduce, FloatImm, IntImm, StringImm, Cast
 from .expr import Add, Sub, Mul, Div, Mod, FloorDiv, FloorMod
 from .expr import Min, Max, EQ, NE, LT, LE, GT, GE, And, Or, Not
 from .expr import Select, BufferLoad, ProducerLoad, Ramp, Broadcast, Shuffle
-from .expr import Call, CallEffectKind, Let, IterVar, CommReducer, Any
+from .expr import Call, CallEffectKind, Let, IterVar, CommReducer, Any, BufferRegion
 
 from .stmt import Stmt, LetStmt, AssertStmt, ForKind, For, While
 from .stmt import (
     BufferStore,
+    BufferRegionStore,
     BufferRealize,
     ProducerStore,
     Allocate,
@@ -41,7 +42,7 @@ from .stmt import (
 
 from .stmt import ProducerRealize, SeqStmt
 from .stmt import IfThenElse, Evaluate, Prefetch, stmt_seq, stmt_list
-from .stmt import BufferRegion, MatchBufferRegion, Block, BlockRealize
+from .stmt import MatchBufferRegion, Block, BlockRealize
 
 from .function import PrimFunc, TensorIntrin, IndexMap
 

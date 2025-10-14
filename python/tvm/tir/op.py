@@ -16,6 +16,7 @@
 # under the License.
 # pylint: disable=redefined-builtin, invalid-name, too-many-arguments
 """Operators used in TIR expression."""
+
 from typing import Any, Optional, Union
 
 import tvm._ffi
@@ -27,6 +28,8 @@ from tvm.runtime import const
 from . import _ffi_api
 from .buffer import Buffer
 from .expr import Call, CommReducer, IntImm, PrimExprWithOp, Var
+
+ExprOrInt = PrimExpr | int
 
 
 def _pack_buffer(buf, span=None):
@@ -3033,7 +3036,7 @@ def fmod(x, y):
     return call_intrin(x.dtype, "tir.fmod", x, y)
 
 
-def if_then_else(cond, t, f, span=None):
+def if_then_else(cond, t, f, span=None) -> PrimExpr:
     """Conditional selection expression.
 
     Parameters
@@ -3585,3 +3588,95 @@ def get_vscale_expr(dtype: Union[str, tvm.DataType], min_size: int = 128) -> Pri
 sum = comm_reducer(lambda x, y: x + y, lambda t: const(0, dtype=t), name="sum")
 min = comm_reducer(lambda x, y: _ffi_api._OpMin(x, y, None), max_value, name="min")  # type: ignore
 max = comm_reducer(lambda x, y: _ffi_api._OpMax(x, y, None), min_value, name="max")  # type: ignore
+
+
+def triton_full(
+    dtype: str, value: PrimExpr, *shape: PrimExpr | int, span: Span | None = None
+) -> Call:
+    """Create a tensor in Triton: `triton_full(dtype, value, *shape)`.
+    This is equivalent to `triton.zeros(shape, dtype) + value` in Triton."""
+
+    return call_intrin(dtype, "tir.triton_full", dtype, value, *shape, span=span)
+
+
+def triton_dot(
+    lhs: PrimExpr, rhs: PrimExpr, accumulator: PrimExpr | None = None, span: Span | None = None
+) -> Call:
+    """Create a dot-product (a matmul): `triton_dot(lhs, rhs, accumulator)`.
+    In Triton: `triton.dot(lhs, rhs, accumulator)`.
+    NOTE: the type of the result is set to "handle" because the dtype of triton `dot` output
+    is slightly complicated (although it's mostly float32)."""
+
+    if accumulator is None:
+        return call_intrin("handle", "tir.triton_dot", lhs, rhs, span=span)
+    else:
+        return call_intrin("handle", "tir.triton_dot", lhs, rhs, accumulator, span=span)
+
+
+def triton_reduce(
+    expr: PrimExpr, axis: ExprOrInt, combine_fn: str, span: Span | None = None
+) -> Call:
+    """Create a reduce expression: `triton_reduce(expr, axis, combine_fn)`.
+    `combine_fn` is a TVM string.
+    In Triton: `triton.{min|max|sum...}(tensor, axis)`."""
+
+    return call_intrin(expr.dtype, "tir.triton_reduce", expr, axis, combine_fn, span=span)
+
+
+def triton_load(expr: PrimExpr, span: Span | None = None) -> Call:
+    """Load from a block of pointers: `triton_load(expr)`.
+    In Triton: `triton.load(expr)`."""
+    return call_intrin("handle", "tir.triton_load", expr, span=span)
+
+
+def triton_store(ptr: PrimExpr, value: PrimExpr, span: Span | None = None) -> Call:
+    """Store to a block of pointers: `triton_store(ptr, value)`.
+    In Triton: `triton.store(ptr, value)`."""
+    return call_intrin("handle", "tir.triton_store", ptr, value, span=span)
+
+
+def triton_make_block_ptr(
+    tensor_data: Var,
+    offset: PrimExpr,
+    ndim: IntImm | int,
+    *args: ExprOrInt,
+    span: Span | None = None,
+) -> Call:
+    """Create a pointer to a block in a tensor: `triton_make_block_ptr(tensor_data, offset, ndim,
+    shape, strides, offsets, block_shape, order)`.
+
+    Parameters
+    ----------
+    tensor_data : Var
+        The tensor data.
+    offset : PrimExpr
+        An additional scalar offset to the base pointer.
+    ndim : IntImm | int
+        The number of dimensions of the output.
+    *args : list[PrimExpr]
+        A pack of (shape, strides, offsets, block_shape, order); must be 5 * `ndim` PrimExprs in total.
+    """
+    ndim_int = int(ndim)
+    if len(args) != 5 * ndim_int:
+        raise ValueError(f"Expected 5 * {ndim_int} arguments in *args, got {len(args)}")
+    return call_intrin(
+        "handle", "tir.triton_make_block_ptr", tensor_data, offset, ndim, *args, span=span
+    )
+
+
+def triton_permute(expr: PrimExpr, *args: ExprOrInt, span: Span | None = None) -> Call:
+    """Create a permuted expression: `triton_permute(expr, *args)`.
+    In Triton: `triton.permute(expr, *args)`."""
+    return call_intrin(expr.dtype, "tir.triton_permute", expr, *args, span=span)
+
+
+def triton_arange(start: ExprOrInt, end: ExprOrInt) -> Call:
+    """Create an arange expression: `triton_arange(start, end)`.
+    In Triton: `triton.arange(start, end)`."""
+    return call_intrin("handle", "tir.triton_arange", start, end)
+
+
+def triton_where(predicate: PrimExpr, true_value: PrimExpr, false_value: PrimExpr) -> Call:
+    """Create a where expression: `triton_where(predicate, true_value, false_value)`.
+    In Triton: `triton.where(predicate, true_value, false_value)`."""
+    return call_intrin("handle", "tir.triton_where", predicate, true_value, false_value)

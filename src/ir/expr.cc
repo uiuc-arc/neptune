@@ -53,20 +53,6 @@ PrimExpr PrimExpr::FromObject_(ObjectRef ref) {
   if (auto opt = ref.as<runtime::Int>()) {
     return Integer(opt.value());
   }
-  if (const auto* buffer_region = ref.as<tir::BufferRegionNode>()) {
-    Array<PrimExpr> indices;
-    indices.reserve(buffer_region->region.size());
-    for (const Range& r : buffer_region->region) {
-      if (tvm::tir::is_one(r->extent)) {
-        indices.push_back(r->min);
-      } else if (r->extent.as<IntImmNode>()) {
-        indices.push_back(tir::Ramp(r->min, tvm::tir::make_const(r->min->dtype, 1), r->extent));
-      } else {
-        LOG(FATAL) << "ValueError: Cannot convert to BufferLoad: " << ref;
-      }
-    }
-    return tir::BufferLoad(buffer_region->buffer, indices);
-  }
   Optional<String> actual_type = ObjectTypeChecker<PrimExpr>::CheckAndGetMismatch(ref.get());
   ICHECK(!actual_type.defined()) << "Expected type " << ObjectTypeChecker<PrimExpr>::TypeName()
                                  << " but got " << actual_type.value();
@@ -157,6 +143,10 @@ Range::Range(PrimExpr begin, PrimExpr end, Span span)
 
 Range Range::FromMinExtent(PrimExpr min, PrimExpr extent, Span span) {
   return Range(make_object<RangeNode>(min, extent, span));
+}
+
+Range Range::FromExtent(PrimExpr extent, Span span) {
+  return Range::FromMinExtent(tir::make_zero(extent->dtype), extent, span);
 }
 
 TVM_REGISTER_GLOBAL("ir.Range_from_min_extent").set_body_typed(Range::FromMinExtent);

@@ -22,19 +22,17 @@
  * \brief Compact the buffer size into its exact need.
  */
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
-#include <tvm/arith/int_solver.h>
+#include <tvm/tir/analysis.h>
 #include <tvm/tir/op.h>
+#include <tvm/tir/schedule/utils.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <numeric>
-#include <stack>
-
-#include "../../support/arena.h"
+#include "../../arith/const_fold.h"
 #include "../../support/nd_int_set.h"
-#include "../../support/utils.h"
-#include "../schedule/utils.h"
+#include "../schedule/analysis.h"
 #include "ir_utils.h"
 
 namespace tvm {
@@ -143,7 +141,9 @@ class BufferAccessRegionCollector : public StmtExprVisitor {
   void VisitExpr_(const VarNode* op) final { VisitBufferVar(GetRef<Var>(op)); }
 
   void VisitStmt_(const ForNode* op) final {
-    Range loop_range = Range::FromMinExtent(op->min, op->extent);
+    auto ann_orig_bounds = GetAnn<Range>(op, attr::tir_loop_original_bounds);
+    auto loop_range = ann_orig_bounds.defined() ? ann_orig_bounds.value()
+                                                : Range::FromMinExtent(op->min, op->extent);
     IterVar iter = op->kind == ForKind::kThreadBinding
                        ? IterVar(Range(), op->loop_var, IterVarType::kThreadIndex,
                                  op->thread_binding.value()->thread_tag)
@@ -219,9 +219,6 @@ class BufferAccessRegionCollector : public StmtExprVisitor {
   }
 
   void VisitStmt_(const BlockNode* op) final {
-    // Step 0. Check there is no init part and block is opaque
-    ICHECK(!op->init.defined());
-    ICHECK_EQ(op->iter_vars.size(), 0) << "CompactBufferRegion only works on opaque blocks";
     // Step 1. Record and update current read/write region annotations
     std::unordered_map<Buffer, std::vector<BufferRegion>, ObjectPtrHash, ObjectPtrEqual>
         cur_access_annotations;
@@ -231,9 +228,8 @@ class BufferAccessRegionCollector : public StmtExprVisitor {
     for (const BufferRegion& region : op->writes) {
       cur_access_annotations[region->buffer].push_back(region);
     }
-    for (auto& p : cur_access_annotations) {
-      auto& regions = access_annotations_[p.first];
-      p.second.swap(regions);
+    for (auto& [buf, regions] : cur_access_annotations) {
+      regions.swap(access_annotations_[buf]);
     }
     // Step 2. Record relax position of ancestor_loops_
     for (const Buffer& buffer : op->alloc_buffers) {
@@ -264,7 +260,9 @@ class BufferAccessRegionCollector : public StmtExprVisitor {
 
   void VisitStmt_(const BlockRealizeNode* op) final {
     With<ConditionalBoundsContext> ctx(op->predicate, &dom_map_, &hint_map_, &pending_conditions_);
+    binding_ = GetBindings(GetRef<BlockRealize>(op));
     StmtExprVisitor::VisitStmt_(op);
+    binding_.clear();
   }
 
   void VisitStmt_(const AllocateNode* op) final {
@@ -345,8 +343,8 @@ class BufferAccessRegionCollector : public StmtExprVisitor {
                           [normalize_pred](const PrimExpr& x, const PrimExpr& y) {
                             return normalize_pred(x) && normalize_pred(y);
                           }));
-      NDIntSet nd_int_set =
-          NDIntSetEval(buffer_region->region, predicate, dom_map_, &dom_analyzer_);
+      Region region = Substitute(buffer_region->region, binding_);
+      NDIntSet nd_int_set = NDIntSetEval(region, predicate, dom_map_, &dom_analyzer_);
 
       // Step 3. Restore the non-relaxed ancestor loops domain
       for (size_t i = 0; i < n_ancestor_loops; ++i) {
@@ -489,6 +487,9 @@ class BufferAccessRegionCollector : public StmtExprVisitor {
   /*! \brief The map from Buffer to it's access regions annotated by current block. */
   std::unordered_map<Buffer, std::vector<BufferRegion>, ObjectPtrHash, ObjectPtrEqual>
       access_annotations_;
+
+  /*! \brief A mapping from variable of an IterVar to its expr. */
+  Map<Var, PrimExpr> binding_;
 };
 
 /*! \brief The storage alignment for a dimension */
@@ -498,6 +499,30 @@ struct DimAlignInfo {
   /*! \brief The offset of the alignment */
   int align_offset{0};
 };
+
+Array<PrimExpr> CalcStrides(const std::vector<DimAlignInfo>& dim_aligns,
+                            const Array<PrimExpr>& shape) {
+  std::vector<PrimExpr> strides;
+  if (dim_aligns.size()) {
+    ICHECK(dim_aligns.size() == shape.size());
+    strides.resize(shape.size());
+    PrimExpr stride = make_const(shape[0].dtype(), 1);
+    for (size_t i = shape.size(); i != 0; --i) {
+      size_t dim = i - 1;
+      DimAlignInfo info = dim_aligns[dim];
+      int align_factor = info.align_factor;
+      int align_offset = info.align_offset;
+      if (align_factor != 0) {
+        PrimExpr factor = make_const(stride.dtype(), align_factor);
+        PrimExpr offset = make_const(stride.dtype(), align_offset);
+        stride = stride + indexmod(factor + offset - indexmod(stride, factor), factor);
+      }
+      strides[dim] = stride;
+      stride = stride * shape[dim];
+    }
+  }
+  return strides;
+}
 
 struct BufferAllocInfo {
   /*! \brief The buffer access region. */
@@ -509,42 +534,105 @@ struct BufferAllocInfo {
    * \note The value if NullOpt if the buffer do not need reallocate (e.g parameter buffer).
    */
   Buffer new_buffer;
+  /*! \brief The dimensions that don't have size-1 extent. */
+  std::vector<int> non_trivial_dims;
+  /*! \brief Number of dimensions in the old buffer (before removing trivial dims, if any) */
+  size_t prev_n_dim;
+
+  BufferAllocInfo(Region region, Buffer old_buffer, std::vector<int> non_trivial_dims,
+                  const std::optional<StorageAlignAnnotation>& storage_align)
+      : non_trivial_dims(std::move(non_trivial_dims)), prev_n_dim(old_buffer->shape.size()) {
+    // Remove size-1 dimensions from `region`. `shape` and `strides` will follow.
+    this->region = RemoveTrivialDims(region);
+    // Set dim alignment info
+    if (storage_align.has_value()) {
+      this->dim_aligns.resize(prev_n_dim);
+      for (const StorageAlignTuple& dim_align : *storage_align) {
+        ICHECK(dim_align.size() == 4);
+        int dim = dim_align[1]->value;
+        int factor = dim_align[2]->value;
+        int offset = dim_align[3]->value;
+        this->dim_aligns.at(dim) = {factor, offset};
+      }
+      // Remove size-1 dimensions from `dim_aligns`.
+      // FIXME: if someone is actually padding trivial (size-1) dims into a non-1 size, this will
+      // break.
+      this->dim_aligns = RemoveTrivialDims(this->dim_aligns);
+    }
+    // Create new buffer
+    Array<PrimExpr> shape = this->region.Map([](const Range& range) { return range->extent; });
+    Array<PrimExpr> strides = CalcStrides(this->dim_aligns, shape);
+    ObjectPtr<BufferNode> n = make_object<BufferNode>(*old_buffer.get());
+    n->shape = std::move(shape);
+    n->strides = std::move(strides);
+    this->new_buffer = Buffer(n);
+  }
+
+  template <typename Container>
+  Container RemoveTrivialDims(const Container& arr) const {
+    Container res;
+    for (size_t i = 0; i < non_trivial_dims.size(); ++i) {
+      res.push_back(arr[non_trivial_dims[i]]);
+    }
+    return res;
+  }
+
+  /*! \brief Map from old buffer dimensions to new buffer dimensions. */
+  auto MakeDimRemapping() const {
+    std::vector<std::optional<int>> ret(prev_n_dim, std::nullopt);
+    for (size_t i = 0; i < non_trivial_dims.size(); ++i) {
+      ret[non_trivial_dims[i]] = i;
+    }
+    return ret;
+  }
 };
 
 /*! \brief Reallocate the buffers with minimal region. */
 class BufferCompactor : public StmtExprMutator {
  public:
-  explicit BufferCompactor(std::unordered_map<Var, BufferAllocInfo> buffer_info)
-      : buffer_info_(std::move(buffer_info)) {}
+  explicit BufferCompactor(std::unordered_map<Var, BufferAllocInfo> buffer_info,
+                           BlockMap* block_map)
+      : buffer_info_(std::move(buffer_info)), block_map_(block_map) {}
 
   Stmt VisitStmt_(const BufferStoreNode* _op) final {
     BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(_op));
     BufferStoreNode* op = store.CopyOnWrite();
-    RewriteBufferAccess(&op->buffer, &op->indices);
+    RewriteBufferAccess(op->buffer, op->indices);
     return std::move(store);
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode* _op) final {
     BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(_op));
     BufferLoadNode* op = load.CopyOnWrite();
-    RewriteBufferAccess(&op->buffer, &op->indices);
+    RewriteBufferAccess(op->buffer, op->indices);
     return std::move(load);
   }
 
-  Stmt VisitStmt_(const BlockNode* op) final {
-    // Step 0. Check there is no Init part.
-    ICHECK(!op->init.defined());
+  Stmt VisitStmt_(const BlockNode* op) final { return VisitBlock(op); }
+
+  Block VisitBlock(const BlockNode* op) {
     // Step 1. Reallocate and rewrite alloc_buffers, also update BufferAllocInfo.
     Array<Buffer> alloc_buffers =
         op->alloc_buffers.Map([this](const Buffer& buf) { return RewriteAllocBuffer(buf); });
     // Step 2. Recursively rewrite BufferLoad/BufferStore.
     Block block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
     // Step 3. Update block signature.
-    BlockNode* n = block.CopyOnWrite();
-    RewriteBufferRegions(&n->reads);
-    RewriteBufferRegions(&n->writes);
-    RewriteMatchBuffers(&n->match_buffers);
-    n->alloc_buffers = std::move(alloc_buffers);
+    {
+      BlockNode* n = block.CopyOnWrite();
+      auto RewriteBufferRegion_ = [this](const BufferRegion& buf_region) {
+        return RewriteBufferRegion(buf_region);
+      };
+      auto RewriteMatchBuffer_ = [this](const MatchBufferRegion& match_buffer) {
+        return MatchBufferRegion(match_buffer->buffer, RewriteBufferRegion(match_buffer->source));
+      };
+      n->reads = n->reads.Map(RewriteBufferRegion_);
+      n->writes = n->writes.Map(RewriteBufferRegion_);
+      n->match_buffers = n->match_buffers.Map(RewriteMatchBuffer_);
+      n->alloc_buffers = std::move(alloc_buffers);
+    }
+    if (block_map_) {
+      block_map_->Insert(GetRef<Block>(op), block);
+    }
     return std::move(block);
   }
 
@@ -584,138 +672,111 @@ class BufferCompactor : public StmtExprMutator {
     return buffer;
   }
 
-  void RewriteBufferAccess(Buffer* buffer, Array<PrimExpr>* indices) const {
-    auto it = buffer_info_.find((*buffer)->data);
+  void RewriteBufferAccess(Buffer& buffer, Array<PrimExpr>& indices) {
+    auto it = buffer_info_.find(buffer->data);
     if (it == buffer_info_.end()) {
       return;
     }
     const BufferAllocInfo& info = it->second;
-    ICHECK_EQ(indices->size(), info.region.size());
-    int ndim = info.region.size();
-    Array<PrimExpr> new_indices;
-    new_indices.reserve(ndim);
-    for (int i = 0; i < ndim; ++i) {
-      new_indices.push_back((*indices)[i] - info.region[i]->min);
-    }
-    *buffer = info.new_buffer;
-    *indices = std::move(new_indices);
+    indices = RewriteBufferIndices(buffer, indices, info);
+    buffer = info.new_buffer;
   }
 
-  void RewriteBufferRegion(Buffer* buffer, Region* region) const {
-    auto it = buffer_info_.find((*buffer)->data);
+  BufferRegion RewriteBufferRegion(const BufferRegion& buffer_region) {
+    auto buffer = buffer_region->buffer;
+    auto it = buffer_info_.find(buffer->data);
     if (it == buffer_info_.end()) {
-      // Skip if the buffer is parameter
-      return;
+      return buffer_region;
     }
     const BufferAllocInfo& info = it->second;
-    ICHECK_EQ(region->size(), info.region.size());
+    Array<PrimExpr> region_min, region_extents;
+    for (const Range& range : buffer_region->region) {
+      region_min.push_back(range->min);
+      region_extents.push_back(range->extent);
+    }
+    // RewriteBufferAccess removes trivial dims of `region_min`.
+    region_min = RewriteBufferIndices(buffer, region_min, info);
+    region_extents = info.RemoveTrivialDims(region_extents);
+    // Remove trivial dims of `output_to_input_dims`.
+    Array<Optional<Integer>> new_o2i;
+    auto non_trivial_dims = info.MakeDimRemapping();
+    for (const auto& dim : buffer_region->output_to_input_dims) {
+      if (!dim.defined()) {
+        new_o2i.push_back(dim);
+        continue;
+      }
+      auto in_dim = non_trivial_dims[dim.value()->value];
+      if (in_dim.has_value()) {
+        new_o2i.push_back(Integer(in_dim.value()));
+      }
+    }
+    buffer = info.new_buffer;
     Region new_region;
-    new_region.reserve(info.region.size());
-    for (size_t i = 0; i < info.region.size(); ++i) {
-      const Range& range = (*region)[i];
-      new_region.push_back(Range::FromMinExtent(range->min - info.region[i]->min, range->extent));
+    for (size_t i = 0; i < region_min.size(); ++i) {
+      new_region.push_back(Range::FromMinExtent(region_min[i], region_extents[i]));
     }
-    *buffer = info.new_buffer;
-    *region = std::move(new_region);
+    return BufferRegion(buffer, new_region, new_o2i);
   }
 
-  void RewriteBufferRegions(Array<BufferRegion>* regions) const {
-    Array<BufferRegion> new_regions;
-    new_regions.reserve(regions->size());
-    for (const auto& region : *regions) {
-      BufferRegion buffer_region = region;
-      BufferRegionNode* p = buffer_region.CopyOnWrite();
-      RewriteBufferRegion(&p->buffer, &p->region);
-      new_regions.push_back(buffer_region);
+  Array<PrimExpr> RewriteBufferIndices(const Buffer& buffer, Array<PrimExpr> indices,
+                                       const BufferAllocInfo& info) {
+    indices = info.RemoveTrivialDims(indices);
+    ICHECK_EQ(indices.size(), info.region.size());
+    for (int i = 0; i < info.region.size(); ++i) {
+      indices.Set(i, analyzer_.Simplify(indices[i] - info.region[i]->min));
     }
-    *regions = std::move(new_regions);
-  }
-
-  void RewriteMatchBuffers(Array<MatchBufferRegion>* match_buffers) const {
-    Array<MatchBufferRegion> result;
-    result.reserve(match_buffers->size());
-    for (const auto& match_buffer : *match_buffers) {
-      const BufferRegion& buffer_region = match_buffer->source;
-      auto p = make_object<BufferRegionNode>(*buffer_region.get());
-      RewriteBufferRegion(&p->buffer, &p->region);
-      result.push_back(MatchBufferRegion(match_buffer->buffer, BufferRegion(p)));
-    }
-    *match_buffers = std::move(result);
+    return indices;
   }
 
   /*! \brief Map buffer var to the allocation information about each buffer. */
   std::unordered_map<Var, BufferAllocInfo> buffer_info_;
-};
+  /*! \brief A mapping from unmodified old blocks to the modified blocks. */
+  BlockMap* block_map_;
 
-Array<PrimExpr> CalcStrides(const BufferAllocInfo& alloc_info, const Array<PrimExpr>& shape) {
-  std::vector<PrimExpr> strides;
-  if (alloc_info.dim_aligns.size()) {
-    ICHECK(alloc_info.dim_aligns.size() == shape.size());
-    strides.resize(shape.size());
-    PrimExpr stride = make_const(shape[0].dtype(), 1);
-    for (size_t i = shape.size(); i != 0; --i) {
-      size_t dim = i - 1;
-      DimAlignInfo info = alloc_info.dim_aligns[dim];
-      int align_factor = info.align_factor;
-      int align_offset = info.align_offset;
-      if (align_factor != 0) {
-        PrimExpr factor = make_const(stride.dtype(), align_factor);
-        PrimExpr offset = make_const(stride.dtype(), align_offset);
-        stride = stride + indexmod(factor + offset - indexmod(stride, factor), factor);
-      }
-      strides[dim] = stride;
-      stride = stride * shape[dim];
-    }
-  }
-  return strides;
-}
+  arith::Analyzer analyzer_;
+};
 
 Stmt BufferCompactorCompact(
     const PrimFunc& f,
     const std::unordered_map<Buffer, Region, ObjectPtrHash, ObjectPtrEqual>& regions,
-    const std::unordered_map<Var, StorageAlignAnnotation>& storage_align) {
+    const std::unordered_map<Var, StorageAlignAnnotation>& storage_align, bool remove_trivial_dims,
+    BlockMap* block_map) {
+  arith::Analyzer analyzer;
+  // List all dims of `region` that don't have size=1 (or all dims if `remove_trivial_dims` is
+  // false).
+  auto ListNonTrivialDims = [&analyzer, remove_trivial_dims](const Region& region) {
+    std::vector<int> non_trivial_dims;
+    for (size_t i = 0; i < region.size(); ++i) {
+      if (analyzer.CanProve(region[i]->extent != 1) || !remove_trivial_dims) {
+        non_trivial_dims.push_back(i);
+      }
+    }
+    return non_trivial_dims;
+  };
   // collect buffer allocation info for no-alias buffers
   std::unordered_map<Var, BufferAllocInfo> buffer_info;
   for (const auto& kv : regions) {
     const Buffer& buffer = kv.first;
-    // set dim alignment info
     Region region = kv.second;
-    BufferAllocInfo alloc_info;
+    auto non_trivial_dims = ListNonTrivialDims(region);
     auto it = storage_align.find(buffer->data);
-    if (it != storage_align.end()) {
-      std::vector<DimAlignInfo> dim_aligns(buffer->shape.size());
-      for (const StorageAlignTuple& dim_align : (*it).second) {
-        ICHECK(dim_align.size() == 4);
-        int dim = dim_align[1]->value;
-        int factor = dim_align[2]->value;
-        int offset = dim_align[3]->value;
-        dim_aligns.at(dim) = {factor, offset};
-      }
-      alloc_info.dim_aligns = std::move(dim_aligns);
-    }
-
-    // prepare new buffer
-    Array<PrimExpr> shape = region.Map([](const Range& range) { return range->extent; });
-    Array<PrimExpr> strides = CalcStrides(alloc_info, shape);
-    ObjectPtr<BufferNode> n = make_object<BufferNode>(*buffer.get());
-    n->shape = std::move(shape);
-    n->strides = std::move(strides);
-    alloc_info.new_buffer = Buffer(std::move(n));
-    alloc_info.region = region;
-    buffer_info.emplace(buffer->data, std::move(alloc_info));
+    auto align = it == storage_align.end() ? std::nullopt
+                                           : std::optional<StorageAlignAnnotation>(it->second);
+    buffer_info.emplace(buffer->data, BufferAllocInfo(region, buffer, non_trivial_dims, align));
   }
-  BufferCompactor compactor(std::move(buffer_info));
+  BufferCompactor compactor(std::move(buffer_info), block_map);
   Stmt stmt = compactor(f->body);
   return stmt;
 }
 
-PrimFunc CompactBufferAllocation(PrimFunc f, bool is_strict) {
+PrimFunc CompactBufferAllocation(PrimFunc f, bool is_strict, bool remove_trivial_dims,
+                                 BlockMap* block_map) {
   // Only apply this pass to TIR that is not from TE schedules
   if (!IsFromLegacyTESchedule(f)) {
     PrimFuncNode* fptr = f.CopyOnWrite();
     auto region = BufferAccessRegionCollector::Collect(f, /*collect_inbound=*/is_strict);
     auto storage_align = CollectStorageAlignAnnotation(f->body);
-    fptr->body = BufferCompactorCompact(f, region, storage_align);
+    fptr->body = BufferCompactorCompact(f, region, storage_align, remove_trivial_dims, block_map);
     return f;
   } else {
     return f;
@@ -724,9 +785,9 @@ PrimFunc CompactBufferAllocation(PrimFunc f, bool is_strict) {
 
 namespace transform {
 
-Pass CompactBufferAllocation(bool is_strict) {
+Pass CompactBufferAllocation(bool is_strict, bool remove_trivial_dims) {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    return CompactBufferAllocation(std::move(f), is_strict);
+    return CompactBufferAllocation(std::move(f), is_strict, remove_trivial_dims);
   };
   return CreatePrimFuncPass(pass_func, 0, "tir.CompactBufferAllocation", {});
 }

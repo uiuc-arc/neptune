@@ -38,6 +38,14 @@ void ExprVisitor::VisitExpr_(const BufferLoadNode* op) {
   VisitArray(op->indices, [this](const PrimExpr& e) { this->VisitExpr(e); });
 }
 
+void ExprVisitor::VisitExpr_(const BufferRegionNode* op) {
+  VisitExpr(op->buffer->data);
+  VisitArray(op->region, [this](const Range& r) {
+    this->VisitExpr(r->min);
+    this->VisitExpr(r->extent);
+  });
+}
+
 void ExprVisitor::VisitExpr_(const ProducerLoadNode* op) {
   VisitArray(op->indices, [this](const PrimExpr& e) { this->VisitExpr(e); });
 }
@@ -128,6 +136,24 @@ PrimExpr ExprMutator::VisitExpr_(const BufferLoadNode* op) {
     return GetRef<PrimExpr>(op);
   } else {
     return BufferLoad(op->buffer, indices, op->predicate);
+  }
+}
+
+PrimExpr ExprMutator::VisitExpr_(const BufferRegionNode* op) {
+  auto fmutate = [this](const Range& r) {
+    PrimExpr min = this->VisitExpr(r->min);
+    PrimExpr extent = this->VisitExpr(r->extent);
+    if (min.same_as(r->min) && extent.same_as(r->extent)) {
+      return r;
+    } else {
+      return Range::FromMinExtent(min, extent);
+    }
+  };
+  Array<Range> region = op->region.Map(fmutate);
+  if (region.same_as(op->region)) {
+    return GetRef<PrimExpr>(op);
+  } else {
+    return BufferRegion(op->buffer, region, op->output_to_input_dims);
   }
 }
 

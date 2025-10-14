@@ -18,7 +18,8 @@
  */
 #include "./concrete_schedule.h"
 
-#include <random>
+#include <tvm/support/iterator.h>
+#include <tvm/tir/transform.h>
 
 namespace tvm {
 namespace tir {
@@ -862,11 +863,31 @@ BlockRV ConcreteScheduleNode::DecomposeReduction(const BlockRV& block_rv, const 
   return CreateRV<BlockRV>(result);
 }
 
-BlockRV ConcreteScheduleNode::RFactor(const LoopRV& loop_rv, int factor_axis) {
+BlockRV ConcreteScheduleNode::RFactor(const LoopRV& loop_rv, int factor_axis, bool merge_loops) {
   StmtSRef result{nullptr};
   TVM_TIR_SCHEDULE_BEGIN();
-  result = tir::RFactor(state_, this->GetSRef(loop_rv), factor_axis);
+  result = tir::RFactor(state_, this->GetSRef(loop_rv), factor_axis, merge_loops);
   TVM_TIR_SCHEDULE_END("rfactor", this->error_render_level_);
+  this->state_->DebugVerify();
+  return CreateRV<BlockRV>(result);
+}
+
+BlockRV ConcreteScheduleNode::RollingUpdate(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                            int factor_axis) {
+  StmtSRef result{nullptr};
+  TVM_TIR_SCHEDULE_BEGIN();
+  result = tir::RollingUpdate(state_, this->GetSRef(block_rv), this->GetSRef(loop_rv), factor_axis);
+  TVM_TIR_SCHEDULE_END("rolling-update", this->error_render_level_);
+  this->state_->DebugVerify();
+  return CreateRV<BlockRV>(result);
+}
+
+BlockRV ConcreteScheduleNode::SplitKUpdate(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                           int factor_axis) {
+  StmtSRef result{nullptr};
+  TVM_TIR_SCHEDULE_BEGIN();
+  result = tir::SplitKUpdate(state_, this->GetSRef(block_rv), this->GetSRef(loop_rv), factor_axis);
+  TVM_TIR_SCHEDULE_END("split-k-update", this->error_render_level_);
   this->state_->DebugVerify();
   return CreateRV<BlockRV>(result);
 }
@@ -1007,7 +1028,11 @@ void ConcreteScheduleNode::TransformLayout(const BlockRV& block_rv, int buffer_i
 void ConcreteScheduleNode::TransformBlockLayout(const BlockRV& block_rv,
                                                 const IndexMap& index_map) {
   TVM_TIR_SCHEDULE_BEGIN();
-  tir::TransformBlockLayout(state_, this->GetSRef(block_rv), index_map);
+  auto f_subst = [&](const Var& var) -> Optional<PrimExpr> {
+    return Downcast<Optional<PrimExpr>>(symbol_table_.Get(var));
+  };
+  auto new_index_map = Substitute(index_map, f_subst);
+  tir::TransformBlockLayout(state_, this->GetSRef(block_rv), new_index_map);
   this->state_->DebugVerify();
   TVM_TIR_SCHEDULE_END("transform_block_layout", this->error_render_level_);
 }
@@ -1049,13 +1074,127 @@ void ConcreteScheduleNode::RollingBuffer(const BlockRV& block_rv, int write_buff
   this->state_->DebugVerify();
 }
 
+Array<BlockRV> ConcreteScheduleNode::SplitScanBuffer(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                                     int write_buffer_index) {
+  Array<StmtSRef> result;
+  TVM_TIR_SCHEDULE_BEGIN();
+  result = tir::SplitScanBuffer(state_, this->GetSRef(block_rv), this->GetSRef(loop_rv),
+                                write_buffer_index);
+  TVM_TIR_SCHEDULE_END("split-scan-buffer", this->error_render_level_);
+  this->state_->DebugVerify();
+  Array<BlockRV> return_blocks;
+  for (const StmtSRef& blockrv : result) {
+    return_blocks.push_back(CreateRV<BlockRV>(blockrv));
+  }
+  return return_blocks;
+}
+
 /******** Schedule: Misc ********/
+
+void ConcreteScheduleNode::PropagateIfThenElse(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                               String registered_handler) {
+  TVM_TIR_SCHEDULE_BEGIN();
+  tir::PropagateIfThenElse(state_, this->GetSRef(block_rv), this->GetSRef(loop_rv),
+                           registered_handler);
+  TVM_TIR_SCHEDULE_END("propagate-if-then-else", this->error_render_level_);
+  this->state_->DebugVerify();
+}
 
 void ConcreteScheduleNode::UnsafeHideBufferAccess(const BlockRV& block_rv, const String& buf_type,
                                                   const Array<IntImm>& buf_index_array) {
   TVM_TIR_SCHEDULE_BEGIN();
   tir::UnsafeHideBufferAccess(state_, this->GetSRef(block_rv), buf_type, buf_index_array);
   TVM_TIR_SCHEDULE_END("hide-buffer-access", this->error_render_level_);
+  this->state_->DebugVerify();
+}
+
+/******** Schedule: Function passes (buffer compactification, loop-tile conversion) ********/
+
+namespace {
+
+struct FuncPassPipeline {
+  static auto SetupPipeline(Optional<GlobalVar> func_gv, ScheduleState& self) {
+    ICHECK(func_gv.defined()) << "The function to work on is not set";
+    auto func = Downcast<PrimFunc>(self->mod->Lookup(func_gv.value()));
+    FuncPassPipeline pipeline(func_gv.value(), func);
+    auto root_br = Downcast<BlockRealize>(func->body);
+    StmtSRef root_sref = self->stmt2ref.at(root_br->block.get());
+    return std::make_pair(pipeline, root_sref);
+  }
+
+  void ApplyFuncPass(const std::function<PrimFunc(PrimFunc, BlockMap*)>& func_pass) {
+    func_ = func_pass(func_, &block_map_);
+    // Validate the block map, because when its results are wrong, the bugs are very obscure.
+    block_map_.ValidateOverStmt(func_->body);
+  }
+
+  void ApplyFuncBodyPass(const std::function<Stmt(Stmt, BlockMap*)>& func_pass) {
+    func_.CopyOnWrite()->body = func_pass(func_->body, &block_map_);
+    block_map_.ValidateOverStmt(func_->body);
+  }
+
+  void ReplaceInSchedule(ScheduleState& self, StmtSRef root_sref) {
+    // Inform the ScheduleState of the new function body...
+    auto root_br = Downcast<BlockRealize>(func_->body);
+    self->Replace(root_sref, root_br->block, block_map_.GetFwdMap());
+    self->UpdateScopeBlockInfo(root_br);
+    // Changes can happen on other fields of the PrimFunc, which we have to apply by force replacing
+    // the function in the module.
+    // FIXME: pretty sure this is the only way to do so, but it doesn't feel safe. Currently no
+    // scheduling functionality is broken.
+    self->mod->Update(func_gv_, func_);
+  }
+
+ private:
+  FuncPassPipeline(const GlobalVar& func_gv, const PrimFunc& func)
+      : func_gv_(func_gv), func_(func), block_map_(BlockMap::CreateFromStmt(func->body)) {}
+
+  GlobalVar func_gv_;
+  PrimFunc func_;
+  BlockRealize root_block_;
+  BlockMap block_map_;
+};
+
+}  // namespace
+
+void ConcreteScheduleNode::CompactBuffer() {
+  TVM_TIR_SCHEDULE_BEGIN();
+
+  arith::Analyzer analyzer;
+  auto [pipeline, root_sref] = FuncPassPipeline::SetupPipeline(func_working_on_, state_);
+  pipeline.ApplyFuncPass(tir::PlanAndUpdateBufferAllocationLocation);
+  pipeline.ApplyFuncPass([](PrimFunc func, auto* blkmap) {
+    return tir::CompactBufferAllocation(func, /*remove_trivial_dims*/ true, /*is_strict=*/true,
+                                        blkmap);
+  });
+  pipeline.ApplyFuncPass(
+      [&analyzer](PrimFunc func, auto* blkmap) { return tir::Simplify(func, &analyzer, blkmap); });
+  pipeline.ReplaceInSchedule(this->state_, root_sref);
+
+  TVM_TIR_SCHEDULE_END("compact-buffer", this->error_render_level_);
+  this->state_->DebugVerify();
+}
+
+void ConcreteScheduleNode::ToTileExprForm(const Array<LoopRV>& blockize_hints) {
+  TVM_TIR_SCHEDULE_BEGIN();
+
+  arith::Analyzer analyzer;
+  auto [pipeline, root_sref] = FuncPassPipeline::SetupPipeline(func_working_on_, state_);
+  pipeline.ApplyFuncPass([&](PrimFunc func, BlockMap* blkmap) {
+    auto hints_srefs = support::map(blockize_hints, [this](const LoopRV& loop_rv) {
+                         return this->GetSRef(loop_rv);
+                       }).to_container<Array>();
+    return TileExprAutoBlockize(func, hints_srefs, blkmap);
+  });
+  pipeline.ApplyFuncPass(
+      [&analyzer](PrimFunc func, auto* blkmap) { return tir::Simplify(func, &analyzer, blkmap); });
+  pipeline.ApplyFuncBodyPass(
+      [](Stmt body, auto* blkmap) { return TensorizeIntoTileExpr(body, blkmap); });
+  pipeline.ApplyFuncPass([](PrimFunc func, auto* blkmap) {
+    return WithAttr(func, attr::tir_tile_expr_form, Bool(true));
+  });
+  pipeline.ReplaceInSchedule(this->state_, root_sref);
+  TVM_TIR_SCHEDULE_END("to-tile-expr-form", this->error_render_level_);
   this->state_->DebugVerify();
 }
 

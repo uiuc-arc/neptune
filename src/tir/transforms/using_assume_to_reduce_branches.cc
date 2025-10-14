@@ -35,6 +35,7 @@
  *    4. This pass currently works for op_pattern kElemWise and kBroadcast.
  */
 
+#include <tvm/ir/expr.h>
 #include <tvm/relax/expr.h>
 #include <tvm/relay/op_attr_types.h>
 #include <tvm/tir/builtin.h>
@@ -43,13 +44,9 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <optional>
-
 #include "../../arith/constraint_extract.h"
 #include "../../arith/ir_mutator_with_analyzer.h"
-#include "../../arith/unwrap_vector_expr.h"
-#include "simplify.h"
-#include "tvm/ir/expr.h"
+
 namespace tvm {
 namespace tir {
 

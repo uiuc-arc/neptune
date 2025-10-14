@@ -22,45 +22,46 @@
 namespace tvm {
 namespace tir {
 
-const PrimFuncNode* FindEntryFunc(const IRModule& mod, GlobalVar* result_g_var) {
-  GlobalVar result = NullValue<GlobalVar>();
+namespace {
+
+auto _FindEntryFunc(const IRModule& mod) {
   // Priority 1: PrimFunc marked as `tir::attr::kIsEntryFunc`
   int num_prim_func = 0;
-  const tir::PrimFuncNode* main_func = nullptr;
-  const tir::PrimFuncNode* last_func = nullptr;
-  for (const auto& kv : mod->functions) {
-    GlobalVar gv = kv.first;
-    BaseFunc base_func = kv.second;
+  std::optional<std::pair<const PrimFuncNode*, GlobalVar>> main_func, last_func;
+  for (const auto& [gv, base_func] : mod->functions) {
     if (const auto* func = base_func.as<tir::PrimFuncNode>()) {
-      last_func = func;
       if (func->HasNonzeroAttr(tir::attr::kIsEntryFunc)) {
-        if (result_g_var != nullptr) {
-          *result_g_var = gv;
-        }
-        return func;
+        return decltype(main_func)({func, gv});
       }
       if (gv->name_hint == "main") {
-        main_func = func;
-        result = gv;
+        main_func = {func, gv};
       }
+      last_func = {func, gv};
       ++num_prim_func;
     }
   }
   // Priority 2: PrimFunc whose name is `main`
-  if (main_func != nullptr) {
-    if (result_g_var != nullptr) {
-      *result_g_var = result;
-    }
+  if (main_func) {
     return main_func;
   }
   // Priority 3: The only PrimFunc in the IRModule
   if (num_prim_func == 1) {
-    if (result_g_var != nullptr) {
-      *result_g_var = result;
-    }
     return last_func;
   }
-  return nullptr;
+  return decltype(main_func)(std::nullopt);
+}
+
+}  // namespace
+
+const PrimFuncNode* FindEntryFunc(const IRModule& mod, GlobalVar* result_g_var) {
+  auto func_gv = _FindEntryFunc(mod);
+  if (!func_gv) {
+    return nullptr;
+  }
+  if (result_g_var) {
+    *result_g_var = func_gv->second;
+  }
+  return func_gv->first;
 }
 
 Stmt GetEnclosingLoop(const BlockNode* block, Stmt func_body) {

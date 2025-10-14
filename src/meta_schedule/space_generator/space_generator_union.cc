@@ -70,11 +70,9 @@ class SpaceGeneratorUnionNode : public SpaceGeneratorNode {
  * \return The design space generator created.
  */
 SpaceGenerator SpaceGenerator::SpaceGeneratorUnion(Array<SpaceGenerator> space_generators,
-                                                   Optional<Array<ScheduleRule>> sch_rules,
                                                    Optional<Array<Postproc>> postprocs,
                                                    Optional<Map<Mutator, FloatImm>> mutator_probs) {
   ObjectPtr<SpaceGeneratorUnionNode> n = make_object<SpaceGeneratorUnionNode>();
-  n->sch_rules = std::move(sch_rules);
   n->postprocs = std::move(postprocs);
   n->mutator_probs = std::move(mutator_probs);
   n->space_generators = std::move(space_generators);

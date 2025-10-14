@@ -16,6 +16,7 @@
 # under the License.
 # pylint: disable=invalid-name
 """This file defines ScheduleState, the core data structure of TensorIR scheduling."""
+
 from collections import namedtuple
 from enum import IntEnum
 from typing import Dict, Optional, Union
@@ -24,9 +25,10 @@ from tvm._ffi import register_object
 from tvm.ir import IRModule
 from tvm.runtime import Object
 from tvm.tir import Block, BlockRealize, For, PrimFunc
+from tvm.tir.stmt import Stmt
 
-from . import _ffi_api
 from ..block_scope import BlockScope, StmtSRef
+from . import _ffi_api
 
 CachedFlags = namedtuple("CachedFlags", ["affine_binding", "region_cover", "stage_pipeline"])
 
@@ -163,6 +165,18 @@ class ScheduleState(Object):
         """
         return _ffi_api.ScheduleStateGetBlockScope(  # type: ignore # pylint: disable=no-member
             self, block_sref
+        )
+
+    def _update_scope_block_info(self, block: Stmt) -> None:
+        """Update the block info of the corresponding block
+
+        Parameters
+        ----------
+        block_sref : Stmt
+            The block to be updated
+        """
+        _ffi_api.ScheduleStateUpdateScopeBlockInfo(  # type: ignore # pylint: disable=no-member
+            self, block
         )
 
     def _get_cached_flags(self, block_sref: StmtSRef) -> CachedFlags:

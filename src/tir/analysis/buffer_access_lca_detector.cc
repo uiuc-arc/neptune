@@ -192,7 +192,8 @@ class LCADetector : public StmtExprVisitor {
     for (size_t i = 0; i < block_realize->iter_values.size(); ++i) {
       const IterVar& iter_var = block->iter_vars[i];
       if (iter_var->iter_type != IterVarType::kDataPar &&
-          iter_var->iter_type != IterVarType::kCommReduce) {
+          iter_var->iter_type != IterVarType::kCommReduce &&
+          iter_var->iter_type != IterVarType::kOrdered) {
         do_collect_itervar_scope(iter_var, block_realize->iter_values[i]);
       }
     }

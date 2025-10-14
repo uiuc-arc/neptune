@@ -85,11 +85,9 @@ class ScheduleFnNode : public SpaceGeneratorNode {
 };
 
 SpaceGenerator SpaceGenerator::ScheduleFn(PackedFunc schedule_fn,
-                                          Optional<Array<ScheduleRule>> sch_rules,
                                           Optional<Array<Postproc>> postprocs,
                                           Optional<Map<Mutator, FloatImm>> mutator_probs) {
   ObjectPtr<ScheduleFnNode> n = make_object<ScheduleFnNode>();
-  n->sch_rules = std::move(sch_rules);
   n->postprocs = std::move(postprocs);
   n->mutator_probs = std::move(mutator_probs);
   n->schedule_fn_ = std::move(schedule_fn);

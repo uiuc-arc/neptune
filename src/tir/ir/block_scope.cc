@@ -184,6 +184,18 @@ void SRefTreeCreator::VisitStmt_(const SeqStmtNode* seq_stmt) {
   SetSeqIndexInChildren(stmt2ref_, seq_stmt, include_loops_);
 }
 
+/******** Misc helper functions for SRef statements ********/
+
+Variant<Block, For> GetSRefStmtAsVariant(const StmtSRef& sref) {
+  if (auto block = sref->StmtAs<BlockNode>()) {
+    return GetRef<Block>(block);
+  } else if (auto loop = sref->StmtAs<ForNode>()) {
+    return GetRef<For>(loop);
+  } else {
+    LOG_FATAL << "Unreachable";
+  }
+}
+
 /******** FFI ********/
 
 TVM_REGISTER_NODE_TYPE(StmtSRefNode);

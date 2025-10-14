@@ -18,8 +18,9 @@
 # pylint: disable=invalid-name, inconsistent-return-statements, unidiomatic-typecheck
 # pylint: disable=import-outside-toplevel
 """PyTorch FX frontend of Relax."""
-from typing import Callable, Dict, List, Tuple, Union
+
 from functools import partial, reduce
+from typing import Callable, Dict, List, Tuple, Union
 
 import tvm
 from tvm import relax
@@ -99,7 +100,6 @@ class TorchFXImporter(BaseFXGraphImporter):
     ########## Neural Network ##########
 
     def _adaptive_avg_pool2d_module(self, node: fx.Node) -> relax.Var:
-
         module = self.named_modules[node.target]
         x = self.env[node.args[0]]
         output_size = module.output_size
@@ -552,6 +552,7 @@ class TorchFXImporter(BaseFXGraphImporter):
         self,
     ) -> Dict[Union[torch.nn.Module, str], Callable[[fx.Node], relax.Var]]:
         import operator
+
         from torch import nn
 
         return {
@@ -831,7 +832,7 @@ class TorchFXImporter(BaseFXGraphImporter):
 
 def from_fx(
     model,
-    input_info: List[Tuple[Tuple[int], str]],
+    input_info: List[Tuple[Tuple[int, ...], str]],
     *,
     keep_params_as_input: bool = False,
     unwrap_unit_return_tuple: bool = False,

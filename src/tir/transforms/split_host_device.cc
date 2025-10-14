@@ -32,20 +32,33 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <unordered_map>
-
-#include "../../runtime/thread_storage_scope.h"
 #include "../analysis/var_use_def_analysis.h"
-#include "ir_utils.h"
 
 namespace tvm {
 namespace tir {
 
 class HostDeviceSplitter : public StmtMutator {
  public:
-  explicit HostDeviceSplitter(IRModule* device_mod, std::function<GlobalVar()> var_supply)
+  explicit HostDeviceSplitter(IRModule& device_mod, std::function<GlobalVar()> var_supply)
       : device_mod_(device_mod), var_supply_(var_supply) {}
 
+  PrimFunc VisitFunc_(PrimFunc func) {
+    current_func_params_.clear();
+    for (size_t i = 0; i < func->params.size(); ++i) {
+      auto param = func->params[i];
+      auto it = func->buffer_map.find(param);
+      if (it != func->buffer_map.end()) {
+        param = (*it).second->data;
+      }
+      current_func_params_.Set(param, Integer(i));
+    }
+    if (auto body = VisitStmt(func->body); !body.same_as(func->body)) {
+      func.CopyOnWrite()->body = body;
+    }
+    return func;
+  }
+
+ private:
   Stmt VisitStmt_(const AttrStmtNode* op) final {
     if (op->attr_key == tvm::attr::kTarget) {
       auto device_target = op->node.as<Target>().value().WithoutHost();
@@ -60,17 +73,20 @@ class HostDeviceSplitter : public StmtMutator {
       VarUseDefAnalyzer use_def(/*defined_vars=*/{}, /*visit_thread_extent=*/true);
       use_def(body);
 
-      // Sort first by variable type, then by variable name
       std::vector<Var> params{use_def.undefined_.begin(), use_def.undefined_.end()};
-      std::sort(params.begin(), params.end(), [](const Var& a, const Var& b) {
-        auto sort_key = [](const Var& var) {
-          return std::tuple{
-              !var->dtype.is_handle(),
-              var->name_hint,
-          };
-        };
-        return sort_key(a) < sort_key(b);
-      });
+      // If the variable exists in the current function, put them at the front (keep the order);
+      // otherwise, sort them by handle type first, then by name.
+      auto SortKey = [this](const Var& var) {
+        auto it = current_func_params_.find(var);
+        if (it != current_func_params_.end()) {
+          return std::make_tuple((*it).second->value, false, String());
+        } else {
+          static const auto max = std::numeric_limits<int64_t>::max();
+          return std::make_tuple(max, !var->dtype.is_handle(), var->name_hint);
+        }
+      };
+      std::sort(params.begin(), params.end(),
+                [&SortKey](const Var& a, const Var& b) { return SortKey(a) < SortKey(b); });
       return {params, use_def.undefined_buffers_};
     }();
 
@@ -100,7 +116,7 @@ class HostDeviceSplitter : public StmtMutator {
                                                      {tir::attr::kIsGlobalFunc, Bool(true)}});
 
     GlobalVar kernel_symbol_global = var_supply_();
-    (*device_mod_)->Add(kernel_symbol_global, device_func);
+    device_mod_->Add(kernel_symbol_global, device_func);
     Array<PrimExpr> args = params.Map([](const Var& var) -> PrimExpr { return var; });
 
     if (can_propagate_errors) {
@@ -117,20 +133,16 @@ class HostDeviceSplitter : public StmtMutator {
   }
 
   // target ir module
-  IRModule* device_mod_;
+  IRModule& device_mod_;
+  Map<Var, Integer> current_func_params_;
   // Generate new GlobalVar for the kernel
   std::function<GlobalVar()> var_supply_;
 };
 
-PrimFunc SplitHostDevice(PrimFunc func, IRModule* device_mod,
+PrimFunc SplitHostDevice(PrimFunc func, IRModule& device_mod,
                          std::function<GlobalVar()> var_supply) {
   HostDeviceSplitter splitter(device_mod, var_supply);
-
-  if (auto body = splitter(func->body); !body.same_as(func->body)) {
-    func.CopyOnWrite()->body = body;
-  }
-
-  return func;
+  return splitter.VisitFunc_(func);
 }
 
 namespace transform {
@@ -146,14 +158,12 @@ Pass SplitHostDevice() {
       if (auto opt = base_func.as<PrimFunc>()) {
         PrimFunc func = opt.value();
 
-        auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
-        auto name_prefix = global_symbol.value_or(gvar->name_hint);
-        auto kernel_name = name_prefix + "_kernel";
+        auto kernel_name = gvar->name_hint + "_kernel";
         auto var_supply = [&global_var_supply, &kernel_name]() -> GlobalVar {
           return global_var_supply->FreshGlobal(kernel_name, false);
         };
 
-        func = SplitHostDevice(std::move(func), &device_mod, var_supply);
+        func = SplitHostDevice(std::move(func), device_mod, var_supply);
         if (!func.same_as(base_func)) {
           updates->Add(gvar, func);
         }

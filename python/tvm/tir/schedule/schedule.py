@@ -15,8 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 """The TensorIR schedule class"""
+
 import inspect
-from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
+from collections.abc import Sequence
+
+from beartype import beartype as type_checked
+from beartype.typing import Callable, Dict, List, Literal, Optional, Tuple, TypeAlias, Union
 
 from tvm._ffi import register_object as _register_object
 from tvm.error import TVMError, register_error
@@ -26,7 +30,6 @@ from tvm.tir import Block, Buffer, FloatImm, For, IntImm, PrimFunc
 
 from ..function import IndexMap
 from . import _ffi_api
-from ._type_checker import type_checked
 from .state import ScheduleState, StmtSRef, _parse_debug_mask, _parse_mod
 from .trace import Trace
 
@@ -58,10 +61,14 @@ class BlockRV(Object):
         )
 
 
-# It is a workaround for mypy: https://github.com/python/mypy/issues/7866#issuecomment-549454370
-# This feature is not supported until python 3.10:
-# https://docs.python.org/3.10/whatsnew/3.10.html#pep-613-typealias
-ExprRV = Union[PrimExpr]  # A random variable that evaluates to an integer
+# TypeAlias is available post Python 3.10
+ExprRV: TypeAlias = PrimExpr  # A random variable that evaluates to an integer
+PrimAnnotationValueT = Union[str, int, float, ExprRV]
+AnnotationValueT = Union[
+    PrimAnnotationValueT,
+    List[PrimAnnotationValueT],
+    Dict[str, Union[PrimAnnotationValueT, List[PrimAnnotationValueT]]],
+]
 
 RAND_VAR_TYPE = Union[ExprRV, BlockRV, LoopRV]  # pylint: disable=invalid-name
 
@@ -73,12 +80,13 @@ _ERROR_RENDER_LEVEL: Dict[Literal["detail", "fast", "none"], int] = {
 
 
 def _parse_error_render_level(error_render_level: str) -> int:
-    if error_render_level not in _ERROR_RENDER_LEVEL:
+    level = _ERROR_RENDER_LEVEL.get(error_render_level)
+    if level is None:
         raise ValueError(
             'error_render_level can be "detail", "fast", or "none", but got: '
             + f"{error_render_level}"
         )
-    return _ERROR_RENDER_LEVEL.get(error_render_level)
+    return level
 
 
 def _parse_enable_checks(enable_checks: bool) -> bool:
@@ -597,7 +605,7 @@ class Schedule(Object):
 
     ########## Schedule: Transform loops ##########
     @type_checked
-    def merge(self, *loops: List[LoopRV]) -> LoopRV:
+    def merge(self, *loops: LoopRV) -> LoopRV:
         """Merge a list of loops into one. The loops under their LCA requires:
         1) Under the same scope.
         2) Can't have annotations or thread bindings.
@@ -606,7 +614,7 @@ class Schedule(Object):
 
         Parameters
         ----------
-        *loops : List[LoopRV]
+        *loops : LoopRV
             The loops to be merged
 
         Returns
@@ -672,7 +680,7 @@ class Schedule(Object):
         return _ffi_api.ScheduleMerge(self, loops)  # type: ignore # pylint: disable=no-member
 
     @type_checked
-    def fuse(self, *loops: List[LoopRV], preserve_unit_iters: bool = True) -> LoopRV:
+    def fuse(self, *loops: LoopRV, preserve_unit_iters: bool = True) -> LoopRV:
         """Fuse a list of consecutive loops into one. It requires:
         1) The loops can't have annotations or thread bindings.
         2) The (i+1)-th loop must be the only child of the i-th loop.
@@ -681,7 +689,7 @@ class Schedule(Object):
 
         Parameters
         ----------
-        *loops : List[LoopRV]
+        *loops : LoopRV
             The loops to be fused
 
         Returns
@@ -737,10 +745,10 @@ class Schedule(Object):
     def split(
         self,
         loop: LoopRV,
-        factors: List[Union[int, ExprRV, None]],
+        factors: Sequence[int | ExprRV | None],
         preserve_unit_iters: bool = True,
         disable_predication: bool = False,
-    ) -> List[LoopRV]:
+    ) -> list[LoopRV]:
         """Split a loop into a list of consecutive loops. It requires:
         1) The loop can't have annotation or thread binding.
         2) The loop must start with 0.
@@ -753,7 +761,7 @@ class Schedule(Object):
         loop : LoopRV
             The loop to be split
 
-        factors: List[Union[int, ExprRV, None]]
+        factors: Sequence[Union[int, ExprRV, None]]
             The splitting factors
             Potential inputs are:
             - None
@@ -938,7 +946,7 @@ class Schedule(Object):
         )
 
     @type_checked
-    def reorder(self, *ordered_loops: List[LoopRV]) -> None:
+    def reorder(self, *ordered_loops: LoopRV) -> None:
         """
         Reorder a list of loops. It doesn't require the loops to be consecutive.
         It requires:
@@ -952,7 +960,7 @@ class Schedule(Object):
 
         Parameters
         ----------
-        *ordered_loops : List[LoopRV]
+        *ordered_loops : LoopRV
             The loops in the new order
 
         Examples
@@ -1447,7 +1455,7 @@ class Schedule(Object):
         block: Union[BlockRV, str],
         write_buffer_index: Union[int, str, Buffer],
         storage_scope: str,
-        consumer_blocks: Optional[List[Union[BlockRV, str]]] = None,
+        consumer_blocks: Sequence[BlockRV | str] | None = None,
     ) -> BlockRV:
         """Create a block that reads a buffer region into a write cache. It requires:
 
@@ -1817,8 +1825,10 @@ class Schedule(Object):
             _, read_buffer_index, _ = self._normalize_buffer_arg(
                 block, read_buffer_index, required_buffer_type="read"
             )
-        return _ffi_api.ScheduleCacheInplace(  # type: ignore # pylint: disable=no-member
-            self, block, read_buffer_index, storage_scope
+        return list(
+            _ffi_api.ScheduleCacheInplace(  # type: ignore # pylint: disable=no-member
+                self, block, read_buffer_index, storage_scope
+            )
         )
 
     @type_checked
@@ -1903,8 +1913,10 @@ class Schedule(Object):
         """
         block = self._normalize_block_arg(block)
 
-        return _ffi_api.ScheduleCacheIndex(  # type: ignore # pylint: disable=no-member
-            self, block, storage_scope, cse_thresh
+        return list(
+            _ffi_api.ScheduleCacheIndex(  # type: ignore # pylint: disable=no-member
+                self, block, storage_scope, cse_thresh
+            )
         )
 
     @type_checked
@@ -2426,7 +2438,7 @@ class Schedule(Object):
         return _ffi_api.ScheduleDecomposeReduction(self, block, loop)  # type: ignore
 
     @type_checked
-    def rfactor(self, loop: LoopRV, factor_axis: int) -> BlockRV:
+    def rfactor(self, loop: LoopRV, factor_axis: int, merge_loops: bool = False) -> BlockRV:
         """Factorize an associative reduction block by the specified loop.
 
         An associative reduction cannot be parallelized directly,
@@ -2485,13 +2497,16 @@ class Schedule(Object):
                 for k in range(128):        # loop k is a reduction loop (unchanged)
                     B[i] = B[i] + B_rf[i, k]
 
-
         Parameters
         ----------
         loop : LoopRV
             The loop outside block for which we want to do rfactor
         factor_axis : int
             The position where the new dimension is placed in the new introduced rfactor buffer
+        merge_loops : bool
+            Whether to merge the loop nests of the rfactor block and the original
+            (write-back) block. If true, they will be merged at `loop_sref`; otherwise,
+            these blocks will be separated.
 
         Returns
         -------
@@ -2548,6 +2563,23 @@ class Schedule(Object):
                             B[vii] = 0.0
                         B[vii] = B[vii] + B_rf[vi2, vii]
 
+        If `merge_loops` is true, the rfactor block and the write-back block will be merged at
+        `loop_sref`, producing the following IR instead:
+
+        .. code-block:: python
+
+                for i2, ii in T.grid(128, 128):
+                    for i in T.serial(128):
+                        with T.block("B_rf"):
+                            vi2, vii, vi = T.axis.remap("SSR", [i2, ii, i])
+                            with T.init():
+                                B_rf[vi2, vii] = 0.0
+                            B_rf[vi2, vii] = (B_rf[vi2, vii] + A[vii, vi, vi2])
+                    with T.block("B"):
+                        vii, vi2 = T.axis.remap("SR", [ii, i2])
+                        with T.init():
+                            B[vii] = 0.0
+                        B[vii] = B[vii] + B_rf[vi2, vii]
 
         Note
         ----
@@ -2573,7 +2605,30 @@ class Schedule(Object):
         Negative indexing is normalized according to numpy convention.
         """
         # pylint: disable-next=no-member
-        return _ffi_api.ScheduleRFactor(self, loop, factor_axis)  # type: ignore
+        return _ffi_api.ScheduleRFactor(self, loop, factor_axis, merge_loops)  # type: ignore
+
+    def rolling_update(self, block: BlockRV | str, loop: LoopRV, factor_axis: int) -> BlockRV:
+        """Generalized operator fusion. Fuses a reduction block under a reduction loop.
+        See `tir::RollingUpdate` for more details.
+
+        Parameters
+        ----------
+        block_rv: The block to operate on (the `b0` in the description above)
+        loop_rv: The loop under which the block is fused (the `l` in the description above)
+        factor_axis: The position where the new dimension is placed in the new introduced rfactor buffer.
+
+        Returns
+        -------
+        Block random variable to the newly created rfactor block. The write-back block is
+        repurposed from `b0`, and its BlockRV is still valid.
+        """
+
+        block = self._normalize_block_arg(block)
+        return _ffi_api.ScheduleRollingUpdate(self, block, loop, factor_axis)  # type: ignore
+
+    def split_k_update(self, block: BlockRV | str, loop: LoopRV, factor_axis: int) -> BlockRV:
+        block = self._normalize_block_arg(block)
+        return _ffi_api.ScheduleSplitKUpdate(self, block, loop, factor_axis)  # type: ignore
 
     ######## Schedule: Block annotation ########
 
@@ -3048,13 +3103,6 @@ class Schedule(Object):
 
     ########## Schedule: Annotation ##########
 
-    PrimAnnotationValueT = Union[str, int, float, ExprRV]
-    AnnotationValueT = Union[
-        PrimAnnotationValueT,
-        List[PrimAnnotationValueT],
-        Dict[str, Union[PrimAnnotationValueT, List[PrimAnnotationValueT]]],
-    ]
-
     @type_checked
     def annotate(
         self, block_or_loop: Union[BlockRV, LoopRV], ann_key: str, ann_val: AnnotationValueT
@@ -3207,9 +3255,9 @@ class Schedule(Object):
                     possible_buffers[buf] = (buffer_index_type, buffer_index)
 
             assert possible_buffers, f"Could not find buffer '{buffer}' in block '{block_name}'"
-            assert (
-                len(possible_buffers) == 1
-            ), f"Multiple buffers named '{buffer}' in block '{block_name}'"
+            assert len(possible_buffers) == 1, (
+                f"Multiple buffers named '{buffer}' in block '{block_name}'"
+            )
             buffer_obj, (buffer_index_type, buffer_index) = next(iter(possible_buffers.items()))
 
         elif isinstance(buffer, Buffer):
@@ -3667,7 +3715,7 @@ class Schedule(Object):
     def can_decompose_padding(self, block: Union[BlockRV, str], loop: LoopRV) -> bool:
         """Check whether the block match padding pattern and can be decomposed."""
         # pylint: disable-next=no-member
-        return _ffi_api.CanDecomposePadding(self, block, loop)  # type: ignore
+        return bool(_ffi_api.CanDecomposePadding(self, block, loop))  # type: ignore
 
     @type_checked
     def pad_einsum(self, block: Union[BlockRV, str], padding: List[int]) -> None:
@@ -3870,12 +3918,32 @@ class Schedule(Object):
         # pylint: disable-next=no-member
         return _ffi_api.ScheduleRollingBuffer(self, block, write_buffer_index)  # type: ignore
 
+    @type_checked
+    def split_scan_buffer(
+        self, block: Union[BlockRV, str], loop: LoopRV, write_buffer_index: int
+    ) -> tuple[BlockRV, BlockRV]:
+        block = self._normalize_block_arg(block)
+        # pylint: disable-next=no-member
+        ret = _ffi_api.ScheduleSplitScanBuffer(self, block, loop, write_buffer_index)  # type: ignore
+        assert len(ret) == 2
+        return ret[0], ret[1]
+
     ########## Schedule: Misc ##########
 
     @type_checked
     def enter_postproc(self) -> None:
         """A no-op that marks the start of postprocessing phase of scheduling"""
         _ffi_api.ScheduleEnterPostproc(self)  # type: ignore # pylint: disable=no-member
+
+    @type_checked
+    def propagate_if_then_else(
+        self, block: BlockRV | str, loop: LoopRV, registered_handler: str
+    ) -> None:
+        """Propagate if-then-else condition of the given block to all blocks under the loop, then
+        try to extract a common condition and lift it closer to the loop.
+        """
+        block = self._normalize_block_arg(block)
+        _ffi_api.SchedulePropagateIfThenElse(self, block, loop, registered_handler)  # type: ignore
 
     @type_checked
     def unsafe_hide_buffer_access(
@@ -3907,3 +3975,15 @@ class Schedule(Object):
             buf_type,
             buf_index_array,
         )
+
+    ########## Schedule: Function passes (buffer compactification, loop-tile conversion) ##########
+
+    @type_checked
+    def compact_buffer(self) -> None:
+        """Compactify the buffer allocation of the current function."""
+        _ffi_api.ScheduleCompactBuffer(self)  # type: ignore # pylint: disable=no-member
+
+    @type_checked
+    def to_tile_expr_form(self, blockize_hints: List[LoopRV]) -> None:
+        """Convert the current function from loop form (the default form of TIR) to "tile-expression" form."""
+        _ffi_api.ScheduleToTileExprForm(self, blockize_hints)  # type: ignore # pylint: disable=no-member

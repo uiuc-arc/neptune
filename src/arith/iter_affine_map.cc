@@ -750,7 +750,7 @@ class IterMapRewriter : public ExprMutator {
     if (opt.defined()) {
       return opt.value();
     } else {
-      ErrorLogger(this) << "Could not normalize iterators";
+      ErrorLogger(this) << "Could not normalize iterators " << expr;
       return expr;
     }
   }
@@ -1129,6 +1129,7 @@ class IterMapRewriter : public ExprMutator {
         }
       }
       if (matched_pos == -1) {
+        ErrorLogger(this) << "TryFuseIters: failed to find a match for scale " << expected_scale;
         return NullOpt;
       }
       ICHECK(matched_scale.defined());
@@ -1163,6 +1164,7 @@ class IterMapRewriter : public ExprMutator {
             }
           }
           if (k == expr->args.size()) {
+            ErrorLogger(this) << "TryFuseIters: failed to find a match for predicate " << *it;
             return NullOpt;
           }
           visited[k] = true;
@@ -1209,6 +1211,7 @@ class IterMapRewriter : public ExprMutator {
       // old iter
       if (!analyzer_->CanProveEqual(expected_extra_base, it->second.offset * base_scale)) {
         // the extra offset is not consistent with old
+        ErrorLogger(this) << "TryFuseIters: the extra offset is not consistent with old offset";
         return NullOpt;
       }
       return IterSumExpr({IterSplitExpr(it->second.mark, base_scale)},
@@ -2493,6 +2496,31 @@ Array<Array<IterMark>> SubspaceDivide(const Array<PrimExpr>& bindings,
   results.push_back({IterMark(IterSumExpr({}, 0), subspace_divider.GetOuterPreds()),
                      IterMark(IterSumExpr({}, 0), subspace_divider.GetInnerPreds())});
   return results;
+}
+
+std::pair<std::vector<MarkPair>, PredPair> SubspaceDivide(const Array<PrimExpr>& bindings,
+                                                          const Map<Var, Range>& var_domain,
+                                                          const std::vector<Var>& inner_vars,
+                                                          const PrimExpr& predicate,
+                                                          Analyzer& analyzer) {
+  const size_t M = bindings.size();
+  if (M == 0) {
+    return {{}, {const_true(), const_true()}};
+  }
+  Array<Array<IterMark>> result = SubspaceDivide(bindings, var_domain, inner_vars, predicate,
+                                                 IterMapLevel::Surjective, &analyzer,
+                                                 /*simplify_trivial_iterators=*/true);
+  // M pairs of marks, and one more for the predicate.
+  ICHECK(result.size() == M + 1) << "Failed to divide subspace for bindings " << bindings
+                                 << " with loop variables " << inner_vars;
+  std::vector<std::pair<IterMark, IterMark>> marks;
+  for (size_t i = 0; i < M; ++i) {
+    ICHECK(result[i].size() == 2);
+    marks.emplace_back(result[i][0], result[i][1]);
+  }
+  auto outer_pred = NormalizeIterMapToExpr(result[M][0]->extent),
+       inner_pred = NormalizeIterMapToExpr(result[M][1]->extent);
+  return {marks, {outer_pred, inner_pred}};
 }
 
 TVM_REGISTER_GLOBAL("arith.SubspaceDivide")

@@ -227,14 +227,24 @@ class IRConvertSSA final : public StmtExprMutator {
 
   PrimExpr VisitExpr_(const BufferLoadNode* op) final {
     auto node = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    auto output = VisitBufferAccess(std::move(node));
-    return std::move(output);
+    return VisitBufferAccess(std::move(node));
+  }
+  PrimExpr VisitExpr_(const BufferRegionNode* op) final {
+    auto node = Downcast<BufferRegion>(StmtExprMutator::VisitExpr_(op));
+    return VisitBufferAccess(std::move(node));
   }
 
   Stmt VisitStmt_(const BufferStoreNode* op) final {
     auto node = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    auto output = VisitBufferAccess(std::move(node));
-    return std::move(output);
+    return VisitBufferAccess(std::move(node));
+  }
+  Stmt VisitStmt_(const BufferRegionStoreNode* op) final {
+    auto node = Downcast<BufferRegionStore>(StmtExprMutator::VisitStmt_(op));
+    auto new_region = VisitBufferAccess(node->region);
+    if (!new_region.same_as(node->region)) {
+      node.CopyOnWrite()->region = std::move(new_region);
+    }
+    return std::move(node);
   }
 
   Stmt VisitStmt_(const DeclBufferNode* op) final {

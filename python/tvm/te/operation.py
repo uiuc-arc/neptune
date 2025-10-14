@@ -14,22 +14,23 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-""" Operation class for computation declaration."""
+"""Operation class for computation declaration."""
+
 import inspect
 
 # pylint: disable=invalid-name
 from numbers import Integral as _Integral
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union, overload
 
 import tvm._ffi
 import tvm.arith._ffi_api
 import tvm.tir
 import tvm.tir._ffi_api
 from tvm._ffi.base import string_types
-from tvm.ir import Array
+from tvm.ir import Array, PrimExpr
 from tvm.runtime import convert
 
-from . import _ffi_api
+from . import Tensor, _ffi_api
 from . import tag as _tag
 from . import tensor as _tensor
 
@@ -57,7 +58,14 @@ def placeholder(shape, dtype=None, name="placeholder"):
     return _ffi_api.Placeholder(shape, dtype, name)
 
 
-def compute(shape, fcompute, name="compute", tag="", attrs=None, varargs_names=None):
+def compute(
+    shape: tuple[PrimExpr | int, ...],
+    fcompute: Callable[..., PrimExpr],
+    name: str = "compute",
+    tag: str = "",
+    attrs: dict | None = None,
+    varargs_names: list | None = None,
+) -> Tensor:
     """Construct a new tensor by computing over the shape domain.
 
     The compute rule is result[axis] = fcompute(axis)

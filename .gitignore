@@ -10,7 +10,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 env/
-build/
+build
 build-*/
 develop-eggs/
 dist/
@@ -277,3 +277,6 @@ gallery/how_to/work_with_microtvm/micro_tvmc.py
 
 # GDB history file
 .gdb_history
+
+logs/
+/*.pdf

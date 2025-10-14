@@ -590,6 +590,10 @@ void BufferStore(Buffer buffer, PrimExpr value, Array<PrimExpr> indices,
   AddToParent(tvm::tir::BufferStore(buffer, value, indices, predicate));
 }
 
+void BufferRegionStore(tvm::tir::BufferRegion buffer_region, PrimExpr value) {
+  AddToParent(tvm::tir::BufferRegionStore(buffer_region, value));
+}
+
 void Prefetch(Buffer buffer, Array<Range> bounds) {
   AddToParent(tvm::tir::Prefetch(buffer, bounds));
 }
@@ -718,6 +722,7 @@ TVM_REGISTER_GLOBAL("script.ir_builder.tir.LaunchThread")
 TVM_REGISTER_GLOBAL("script.ir_builder.tir.EnvThread").set_body_typed(EnvThread);
 
 TVM_REGISTER_GLOBAL("script.ir_builder.tir.BufferStore").set_body_typed(BufferStore);
+TVM_REGISTER_GLOBAL("script.ir_builder.tir.BufferRegionStore").set_body_typed(BufferRegionStore);
 TVM_REGISTER_GLOBAL("script.ir_builder.tir.Prefetch").set_body_typed(Prefetch);
 TVM_REGISTER_GLOBAL("script.ir_builder.tir.Evaluate").set_body_typed(Evaluate);
 

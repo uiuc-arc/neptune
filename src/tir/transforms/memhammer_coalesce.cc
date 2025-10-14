@@ -188,8 +188,8 @@ Stmt InverseMapping::Rewrite(const Stmt& stmt, const ConstraintSet& constraints,
   // Step 2. Get Inverse mapping
   arith::Analyzer analyzer;
   DiagnosticContext diag_ctx(DiagnosticContext::Default(IRModule()));
-  auto iter_map =
-      arith::DetectIterMap(mapping_pattern, var_range, Bool(true), arith::Bijective, &analyzer);
+  auto iter_map = arith::DetectIterMap(mapping_pattern, var_range, Bool(true), arith::Bijective,
+                                       &analyzer, /*simplify_trivial_iterators=*/false);
   CHECK_EQ(iter_map->indices.size(), loop_vars.size());
   Map<Var, PrimExpr> inverse_mapping = arith::InverseAffineIterMap(iter_map->indices, loop_vars);
   // Step 3. Generate new body

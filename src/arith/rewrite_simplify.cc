@@ -731,7 +731,7 @@ PrimExpr RewriteSimplifier::Impl::VisitExpr_(const MulNode* op) {
   // Pattern var match IntImm
   PVar<IntImm> c1, c2;
   // Pattern var match FloatImm
-  PVar<FloatImm> c3;
+  PVar<FloatImm> f1, f2;
   // Pattern var for lanes in broadcast and ramp
   PVar<PrimExpr> lanes;
   // Vector rules
@@ -740,7 +740,7 @@ PrimExpr RewriteSimplifier::Impl::VisitExpr_(const MulNode* op) {
     TVM_TRY_REWRITE(matches_one_of(ramp(b1, s1, lanes) * broadcast(x, lanes),
                                    broadcast(x, lanes) * ramp(b1, s1, lanes)),
                     ramp(b1 * x, s1 * x, lanes));
-    TVM_TRY_REWRITE_IF(broadcast(c3, lanes) * x, broadcast(c3, lanes), c3.Eval()->value == 0.0f);
+    TVM_TRY_REWRITE_IF(broadcast(f1, lanes) * x, broadcast(f1, lanes), f1.Eval()->value == 0.0f);
   }
 
   if (IsIndexType(op->dtype)) {
@@ -757,6 +757,9 @@ PrimExpr RewriteSimplifier::Impl::VisitExpr_(const MulNode* op) {
     TVM_TRY_RECURSIVE_REWRITE(x * (c1 * y), (x * y) * c1);
     TVM_TRY_RECURSIVE_REWRITE(c1 * x, x * c1);
     TVM_TRY_RECURSIVE_REWRITE_IF((x - y) * c1, (y - x) * (0 - c1), c1.Eval()->value < 0);
+  } else {
+    // Allow this even for floats
+    TVM_TRY_REWRITE((x * f1) * f2, x * (f1 * f2));
   }
   return ret;
 }
@@ -1311,10 +1314,12 @@ PrimExpr RewriteSimplifier::Impl::VisitExpr_(const MinNode* op) {
         return (x + c2).Eval();
       }
     }
-    if (min(x + c1, x).Match(ret) || min(x, x + c1).Match(ret)) {
-      if (c1.Eval()->value < 0) {
-        return (x + c1).Eval();
-      } else {
+    if (min(x + y, x).Match(ret) || min(x, x + y).Match(ret)) {
+      ConstIntBound y_bound = analyzer_->const_int_bound(y.Eval());
+      if (y_bound->max_value <= 0) {
+        return (x + y).Eval();
+      }
+      if (y_bound->min_value >= 0) {
         return x.Eval();
       }
     }
@@ -1332,6 +1337,11 @@ PrimExpr RewriteSimplifier::Impl::VisitExpr_(const MinNode* op) {
         matches_one_of(min(truncdiv(x + c1, c2) * c2, x), min(x, truncdiv(x + c1, c2) * c2),
                        min(floordiv(x + c1, c2) * c2, x), min(x, floordiv(x + c1, c2) * c2)),
         x, c2.Eval()->value > 0 && c1.Eval()->value + 1 == c2.Eval()->value);
+    // Mod by 2 (could also be int64(2), ...)
+    if (min(floormod(x, c1), floormod(x + c2, c1)).Match(ret) && c1.Eval()->value == 2 &&
+        c2.Eval()->value == 1) {
+      return 0;
+    }
 
     TVM_TRY_REWRITE_IF(matches_one_of(min(truncdiv(x + c1, c2) * c2, max(x, c2)),
                                       min(max(x, c2), truncdiv(x + c1, c2) * c2),
@@ -1495,11 +1505,13 @@ PrimExpr RewriteSimplifier::Impl::VisitExpr_(const MaxNode* op) {
         return (x + c2).Eval();
       }
     }
-    if (max(x + c1, x).Match(ret) || max(x, x + c1).Match(ret)) {
-      if (c1.Eval()->value > 0) {
-        return (x + c1).Eval();
-      } else {
+    if (max(x + y, x).Match(ret) || max(x, x + y).Match(ret)) {
+      ConstIntBound y_bound = analyzer_->const_int_bound(y.Eval());
+      if (y_bound->max_value <= 0) {
         return x.Eval();
+      }
+      if (y_bound->min_value >= 0) {
+        return (x + y).Eval();
       }
     }
     if (max(c1 - x, c2 - x).Match(ret)) {
@@ -2363,9 +2375,11 @@ PrimExpr RewriteSimplifier::Impl::VisitExpr_(const VarNode* op) {
 }
 
 PrimExpr RewriteSimplifier::Impl::VisitExpr_(const CastNode* op) {
-  PrimExpr ret = IRMutatorWithAnalyzer::VisitExpr_(op);
-  op = ret.as<CastNode>();
-  return cast(op->dtype, op->value);
+  auto ret = Downcast<Cast>(IRMutatorWithAnalyzer::VisitExpr_(op));
+  PVar<PrimExpr> x;
+  PVar<DataType> dtype1, dtype2;
+  TVM_TRY_REWRITE(cast(dtype2, cast(dtype1, x)), cast(dtype2, x));
+  return cast(ret->dtype, ret->value);
 }
 
 bool RewriteSimplifier::Impl::CanInlineLet(const LetNode* op) {

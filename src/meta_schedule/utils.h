@@ -491,40 +491,6 @@ struct SortTuningRecordByMeanRunSecs {
   }
 };
 
-/*!
- * \brief The helper function to clone schedule rules, postprocessors, and mutators.
- * \param src The source space generator.
- * \param dst The destination space generator.
- */
-inline void CloneRules(const SpaceGeneratorNode* src, SpaceGeneratorNode* dst) {
-  if (src->sch_rules.defined()) {
-    Array<ScheduleRule> original = src->sch_rules.value();
-    Array<ScheduleRule> sch_rules;
-    sch_rules.reserve(original.size());
-    for (const ScheduleRule& sch_rule : original) {
-      sch_rules.push_back(sch_rule->Clone());
-    }
-    dst->sch_rules = std::move(sch_rules);
-  }
-  if (src->postprocs.defined()) {
-    Array<Postproc> original = src->postprocs.value();
-    Array<Postproc> postprocs;
-    postprocs.reserve(original.size());
-    for (const Postproc& postproc : original) {
-      postprocs.push_back(postproc->Clone());
-    }
-    dst->postprocs = std::move(postprocs);
-  }
-  if (src->mutator_probs.defined()) {
-    Map<Mutator, FloatImm> original = src->mutator_probs.value();
-    Map<Mutator, FloatImm> mutator_probs;
-    for (const auto& kv : original) {
-      mutator_probs.Set(kv.first->Clone(), kv.second);
-    }
-    dst->mutator_probs = std::move(mutator_probs);
-  }
-}
-
 /*! \brief Returns true if the given target is one of the supported gpu targets. */
 inline bool IsGPUTarget(const std::string& target_name) {
   static const std::unordered_set<std::string> gpu_targets{"cuda", "rocm", "vulkan", "metal",

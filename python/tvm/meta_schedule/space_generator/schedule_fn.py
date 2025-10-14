@@ -15,13 +15,13 @@
 # specific language governing permissions and limitations
 # under the License.
 """Union of meta Schedule design space generators."""
+
 from tvm._ffi import register_object
 
 from .. import _ffi_api
 from .space_generator import (
     MutatorProbType,
     PostprocType,
-    ScheduleRuleType,
     SpaceGenerator,
     _normalize_rules,
 )
@@ -39,7 +39,6 @@ class ScheduleFn(SpaceGenerator):
     def __init__(
         self,
         sch_fn: SpaceGenerator.ScheduleFnType,
-        sch_rules: ScheduleRuleType = "from-target",
         postprocs: PostprocType = "from-target",
         mutator_probs: MutatorProbType = "from-target",
     ):
@@ -53,11 +52,10 @@ class ScheduleFn(SpaceGenerator):
             - 2) [Schedule] -> Schedule
             - 3) [Schedule] -> List[Schedule]
         """
-        sch_rules, postprocs, mutator_probs = _normalize_rules(sch_rules, postprocs, mutator_probs)
+        postprocs, mutator_probs = _normalize_rules(postprocs, mutator_probs)
         self.__init_handle_by_constructor__(
             _ffi_api.SpaceGeneratorScheduleFn,  # type: ignore # pylint: disable=no-member
             sch_fn,
-            sch_rules,
             postprocs,
             mutator_probs,
         )

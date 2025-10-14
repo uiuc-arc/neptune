@@ -75,8 +75,10 @@ template <typename FType>
 class ExprFunctor;
 
 // functions to be overriden.
-#define EXPR_FUNCTOR_DEFAULT \
-  { return VisitExprDefault_(op, std::forward<Args>(args)...); }
+#define EXPR_FUNCTOR_DEFAULT                                   \
+  {                                                            \
+    return VisitExprDefault_(op, std::forward<Args>(args)...); \
+  }
 
 #define IR_EXPR_FUNCTOR_DISPATCH(OP)                                                       \
   vtable.template set_dispatch<OP>([](const ObjectRef& n, TSelf* self, Args... args) {     \
@@ -119,6 +121,7 @@ class ExprFunctor<R(const PrimExpr& n, Args...)> {
     return VisitExpr_(static_cast<const VarNode*>(op), std::forward<Args>(args)...);
   }
   virtual R VisitExpr_(const BufferLoadNode* op, Args... args) EXPR_FUNCTOR_DEFAULT;
+  virtual R VisitExpr_(const BufferRegionNode* op, Args... args) EXPR_FUNCTOR_DEFAULT;
   virtual R VisitExpr_(const ProducerLoadNode* op, Args... args) EXPR_FUNCTOR_DEFAULT;
   virtual R VisitExpr_(const LetNode* op, Args... args) EXPR_FUNCTOR_DEFAULT;
   virtual R VisitExpr_(const CallNode* op, Args... args) EXPR_FUNCTOR_DEFAULT;
@@ -162,6 +165,7 @@ class ExprFunctor<R(const PrimExpr& n, Args...)> {
     IR_EXPR_FUNCTOR_DISPATCH(VarNode);
     IR_EXPR_FUNCTOR_DISPATCH(SizeVarNode);
     IR_EXPR_FUNCTOR_DISPATCH(BufferLoadNode);
+    IR_EXPR_FUNCTOR_DISPATCH(BufferRegionNode);
     IR_EXPR_FUNCTOR_DISPATCH(ProducerLoadNode);
     IR_EXPR_FUNCTOR_DISPATCH(LetNode);
     IR_EXPR_FUNCTOR_DISPATCH(CallNode);
@@ -213,6 +217,7 @@ class TVM_DLL ExprVisitor : public ExprFunctor<void(const PrimExpr&)> {
   void VisitExpr_(const VarNode* op) override;
   void VisitExpr_(const SizeVarNode* op) override;
   void VisitExpr_(const BufferLoadNode* op) override;
+  void VisitExpr_(const BufferRegionNode* op) override;
   void VisitExpr_(const ProducerLoadNode* op) override;
   void VisitExpr_(const LetNode* op) override;
   void VisitExpr_(const CallNode* op) override;
@@ -259,6 +264,7 @@ class TVM_DLL ExprMutator : protected ExprFunctor<PrimExpr(const PrimExpr&)> {
   PrimExpr VisitExpr_(const VarNode* op) override;
   PrimExpr VisitExpr_(const SizeVarNode* op) override;
   PrimExpr VisitExpr_(const BufferLoadNode* op) override;
+  PrimExpr VisitExpr_(const BufferRegionNode* op) override;
   PrimExpr VisitExpr_(const ProducerLoadNode* op) override;
   PrimExpr VisitExpr_(const LetNode* op) override;
   PrimExpr VisitExpr_(const CallNode* op) override;
@@ -290,6 +296,53 @@ class TVM_DLL ExprMutator : protected ExprFunctor<PrimExpr(const PrimExpr&)> {
   PrimExpr VisitExpr_(const FloatImmNode* op) override;
   PrimExpr VisitExpr_(const StringImmNode* op) override;
   PrimExpr VisitExpr_(const AnyNode* op) override;
+};
+
+// A stack of data that is fit for use in a visitor.
+template <typename T>
+class VisitorStack {
+  struct StackPushGuard {
+    VisitorStack& dref_;
+    ~StackPushGuard() { dref_.pop(); }
+  };
+
+  void pop() {
+    ICHECK(!data_.empty());
+    data_.pop_back();
+  }
+
+ public:
+  [[nodiscard]] StackPushGuard push(const T& data) {
+    data_.push_back(data);
+    return StackPushGuard{*this};
+  }
+
+  template <typename... Args>
+  [[nodiscard]] StackPushGuard emplace(Args&&... args) {
+    data_.emplace_back(std::forward<Args>(args)...);
+    return StackPushGuard{*this};
+  }
+
+  T& top() {
+    ICHECK(!data_.empty());
+    return data_.back();
+  }
+  size_t size() const { return data_.size(); }
+  bool empty() const { return data_.empty(); }
+
+  std::vector<T> to_vector() const { return std::vector<T>(data_.begin(), data_.end()); }
+
+  // Safe to inspect the data as long as used as const.
+  const std::deque<T>& data() const { return data_; }
+  const auto begin() const { return data_.begin(); }
+  const auto end() const { return data_.end(); }
+
+ private:
+  // We use a deque. A vector can move when growing, which makes nested StackedData usage (such as
+  // StackedData<StackedData<T>>) unsafe, because StackPushGuard may hold a reference to an inner
+  // StackedData, which may be invalidated.
+  // Deque on the other hand doesn't invalidate references when insertion / deletion happens.
+  std::deque<T> data_;
 };
 
 }  // namespace tir

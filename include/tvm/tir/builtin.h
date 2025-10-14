@@ -970,6 +970,63 @@ TVM_DLL const Op& vscale();
  */
 TVM_DLL const Op& get_active_lane_mask();
 
+/****** Tile-expr intrinsics ******/
+
+//! \brief Create a tile with a given value: `tile_full(dtype, value, *shape)`.
+TVM_DLL const Op& tile_full();
+
+//! \brief Create a dot-product (a matmul) between 2 or 3 tiles: `tile_dot(lhs, rhs[,
+//! accumulator])`.
+TVM_DLL const Op& tile_dot();
+
+/*!
+ \brief Create a (1D) reduction over a tile, which produces a tile with one fewer dimension:
+ `tile_reduce(expr, axis, combine_fn)`. `combine_fn` is a TVM string indicating a known
+ reduction function.
+*/
+TVM_DLL const Op& tile_reduce();
+
+//! \brief Permute the dimensions of a tile: `tile_permute(tensor, *permutation)`.
+TVM_DLL const Op& tile_permute();
+
+/*!
+ \brief Create an arange tile: `tile_arange(min, max)` runs from `min` to `max` (exclusive) with
+ step size 1. Similar to the TVM builtin `Ramp`, except that it doesn't require the number of
+ steps to be a known constant.
+ For ease of parsing and reading, we will not allow `min` or `max` to be omitted.
+*/
+TVM_DLL const Op& tile_arange();
+
+/****** Triton pointer operation intrinsics ******/
+
+/*!
+ * \brief Create a pointer to a block in a tensor: `triton_make_block_ptr(tensor_data, offset, M,
+ * shape{M}, strides{M}, offsets{M}, block_shape{M}, order{M})`.
+ * M is the number of dimensions of the output, which might not match the number of dimensions of
+ * the tensor as seen in TVM definition. This behavior is the same as `make_block_ptr` in Triton.
+ * `offset` is an additional scalar (PrimExpr) offset to the base pointer `tensor_data`.
+ */
+TVM_DLL const Op& triton_make_block_ptr();
+
+/*!
+ * \brief Convert a pointer to an integer: `triton_ptr_to_int(ptr)`.
+ * This is a no-op in the Triton frontend language; it is used to for TVM type inference
+ * (performing `handle` -> `int` which would otherwise be illegal).
+ */
+TVM_DLL const Op& triton_ptr_to_int();
+
+/*!
+ * \brief Load from a block of pointers: `triton_load(expr)`.
+ * In Triton: `triton.load(expr)`.
+ */
+TVM_DLL const Op& triton_load();
+
+/*!
+ * \brief Store to a block of pointers: `triton_store(expr)`.
+ * In Triton: `triton.store(expr)`.
+ */
+TVM_DLL const Op& triton_store();
+
 /*! \brief The kind of structure field info used in intrinsic */
 enum TVMStructFieldKind : int {
   // array head address

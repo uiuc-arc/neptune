@@ -266,17 +266,18 @@ class HybridParser(ast.NodeVisitor):
         # Do I need any assertion here?
         return entry
 
-    def visit_Num(self, node):
-        if isinstance(node.n, numbers.Integral):
+    def visit_Constant(self, node):
+        if isinstance(node.value, str):
+            return node.value
+        if isinstance(node.value, numbers.Integral):
             dtype = "int32"
-        elif isinstance(node.n, float):
+        elif isinstance(node.value, float):
             dtype = "float32"
-        else:
-            _internal_assert(
-                isinstance(node.n, bool), "The data type should be one of (int, float, bool)"
-            )
+        elif isinstance(node.value, bool):
             dtype = "bool"
-        return tvm.runtime.const(node.n, dtype)
+        else:
+            raise ValueError("The data type should be one of (int, float, bool)")
+        return tvm.runtime.const(node.value, dtype)
 
     def visit_NameConstant(self, node):
         return tvm.tir.const(node.value)
@@ -569,9 +570,6 @@ class HybridParser(ast.NodeVisitor):
 
     def visit_Tuple(self, node):
         return tuple(self.visit(i) for i in node.elts)
-
-    def visit_Str(self, node):
-        return node.s
 
     def visit_Assert(self, node):
         test = self.visit(node.test)

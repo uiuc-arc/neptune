@@ -26,16 +26,17 @@ Each statement node have subfields that can be visited from python side.
     assert isinstance(st, tvm.tir.stmt.BufferStore)
     assert(st.buffer == buffer)
 """
+
 from enum import IntEnum
 from typing import List, Mapping, Optional, Union
 
 import tvm._ffi
 from tvm.ir import PrimExpr, Range, Span
-from tvm.runtime import Object, Scriptable, const, NDArray
+from tvm.runtime import NDArray, Object, Scriptable, const
 
 from . import _ffi_api
 from .buffer import Buffer, DataProducer
-from .expr import Var, IterVar
+from .expr import BufferRegion, IterVar, Var
 
 
 class Stmt(Object, Scriptable):
@@ -67,9 +68,7 @@ class LetStmt(Stmt):
     span: Optional[Span]
 
     def __init__(self, var: Var, value: PrimExpr, body: Stmt, span: Optional[Span] = None) -> None:
-        self.__init_handle_by_constructor__(
-            _ffi_api.LetStmt, var, value, body, span  # type: ignore
-        )
+        self.__init_handle_by_constructor__(_ffi_api.LetStmt, var, value, body, span)  # type: ignore
 
 
 @tvm._ffi.register_object("tir.AssertStmt")
@@ -99,9 +98,7 @@ class AssertStmt(Stmt):
     def __init__(
         self, condition: PrimExpr, message: PrimExpr, body: Stmt, span: Optional[Span] = None
     ) -> None:
-        self.__init_handle_by_constructor__(
-            _ffi_api.AssertStmt, condition, message, body, span  # type: ignore
-        )
+        self.__init_handle_by_constructor__(_ffi_api.AssertStmt, condition, message, body, span)  # type: ignore
 
 
 class ForKind(IntEnum):
@@ -248,8 +245,25 @@ class BufferStore(Stmt):
         span: Optional[Span] = None,
     ) -> None:
         self.__init_handle_by_constructor__(
-            _ffi_api.BufferStore, buffer, value, indices, predicate, span  # type: ignore
+            _ffi_api.BufferStore,  # type: ignore
+            buffer,
+            value,
+            indices,
+            predicate,
+            span,
         )
+
+
+@tvm._ffi.register_object("tir.BufferRegionStore")
+class BufferRegionStore(Stmt):
+    buffer_region: BufferRegion
+    value: PrimExpr
+    span: Span | None
+
+    def __init__(
+        self, buffer_region: BufferRegion, value: PrimExpr, span: Span | None = None
+    ) -> None:
+        self.__init_handle_by_constructor__(_ffi_api.BufferRegionStore, buffer_region, value, span)  # type: ignore
 
 
 @tvm._ffi.register_object("tir.BufferRealize")
@@ -289,7 +303,12 @@ class BufferRealize(Stmt):
         span: Optional[Span] = None,
     ) -> None:
         self.__init_handle_by_constructor__(
-            _ffi_api.BufferRealize, buffer, bounds, condition, body, span  # type: ignore
+            _ffi_api.BufferRealize,  # type: ignore
+            buffer,
+            bounds,
+            condition,
+            body,
+            span,
         )
 
 
@@ -325,7 +344,11 @@ class ProducerStore(Stmt):
         span: Optional[Span] = None,
     ) -> None:
         self.__init_handle_by_constructor__(
-            _ffi_api.ProducerStore, producer, value, indices, span  # type: ignore
+            _ffi_api.ProducerStore,  # type: ignore
+            producer,
+            value,
+            indices,
+            span,
         )
 
 
@@ -507,7 +530,12 @@ class AttrStmt(Stmt):
         self, node: Object, attr_key: str, value: PrimExpr, body: Stmt, span: Optional[Span] = None
     ) -> None:
         self.__init_handle_by_constructor__(
-            _ffi_api.AttrStmt, node, attr_key, value, body, span  # type: ignore
+            _ffi_api.AttrStmt,  # type: ignore
+            node,
+            attr_key,
+            value,
+            body,
+            span,
         )
 
 
@@ -620,7 +648,11 @@ class IfThenElse(Stmt):
         span: Optional[Span] = None,
     ) -> None:
         self.__init_handle_by_constructor__(
-            _ffi_api.IfThenElse, condition, then_case, else_case, span  # type: ignore
+            _ffi_api.IfThenElse,  # type: ignore
+            condition,
+            then_case,
+            else_case,
+            span,
         )
 
 
@@ -668,26 +700,6 @@ class Prefetch(Stmt):
         self.__init_handle_by_constructor__(_ffi_api.Prefetch, buffer, bounds, span)  # type: ignore
 
 
-@tvm._ffi.register_object("tir.BufferRegion")
-class BufferRegion(Object, Scriptable):
-    """BufferRegion node.
-
-    Parameters
-    ----------
-    buffer : Buffer
-        The buffer of the buffer region
-
-    region : List[Range]
-        The region array of the buffer region
-    """
-
-    buffer: Buffer
-    region: List[Range]
-
-    def __init__(self, buffer: Buffer, region: List[Range]) -> None:
-        self.__init_handle_by_constructor__(_ffi_api.BufferRegion, buffer, region)  # type: ignore
-
-
 @tvm._ffi.register_object("tir.MatchBufferRegion")
 class MatchBufferRegion(Object, Scriptable):
     """MatchBufferRegion node.
@@ -706,7 +718,9 @@ class MatchBufferRegion(Object, Scriptable):
 
     def __init__(self, buffer: Buffer, source: BufferRegion) -> None:
         self.__init_handle_by_constructor__(
-            _ffi_api.MatchBufferRegion, buffer, source  # type: ignore
+            _ffi_api.MatchBufferRegion,
+            buffer,
+            source,  # type: ignore
         )
 
 

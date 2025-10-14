@@ -92,7 +92,7 @@ class TensorInfoNode : public ArgInfoNode {
   TVM_DECLARE_FINAL_OBJECT_INFO(TensorInfoNode, ArgInfoNode);
 
  public:
-  ObjectRef AsJSON() const;
+  ObjectRef AsJSON() const override;
 };
 
 /*!
@@ -114,6 +114,33 @@ class TensorInfo : public ArgInfo {
    */
   TVM_DLL static TensorInfo FromJSON(const ObjectRef& json_obj);
   TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(TensorInfo, ArgInfo, TensorInfoNode);
+};
+
+class ScalarInfoNode : public ArgInfoNode {
+ public:
+  /*! \brief The data type of the scalar. */
+  runtime::DataType dtype;
+
+  ScalarInfoNode() = default;
+  explicit ScalarInfoNode(runtime::DataType dtype) : dtype(dtype) {}
+
+  void VisitAttrs(tvm::AttrVisitor* v) { v->Visit("dtype", &dtype); }
+
+  static constexpr const char* _type_key = "meta_schedule.ScalarInfo";
+  TVM_DECLARE_FINAL_OBJECT_INFO(ScalarInfoNode, ArgInfoNode);
+
+ public:
+  ObjectRef AsJSON() const override;
+};
+
+class ScalarInfo : public ArgInfo {
+ public:
+  TVM_DLL explicit ScalarInfo(runtime::DataType dtype)
+      : ArgInfo(make_object<ScalarInfoNode>(dtype)) {}
+
+  TVM_DLL static ScalarInfo FromJSON(const ObjectRef& json_obj);
+
+  TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(ScalarInfo, ArgInfo, ScalarInfoNode);
 };
 
 }  // namespace meta_schedule

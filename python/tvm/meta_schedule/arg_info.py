@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """The argument information"""
+
 from typing import Any, List, Union
 
 from tvm._ffi import register_object
@@ -123,3 +124,8 @@ class TensorInfo(ArgInfo):
             dtype,
             shape_tuple,
         )
+
+
+@register_object("meta_schedule.ScalarInfo")
+class ScalarInfo(ArgInfo):
+    pass

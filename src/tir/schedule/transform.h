@@ -62,6 +62,17 @@ Buffer WithScope(const Buffer& buffer, const String& scope);
 Buffer WithDType(const Buffer& buffer, const DataType& dtype);
 
 /*!
+ * \brief Create buffers from given BufferStores, adding 1 dim of given size to each buffer.
+ * \param buf_stores The BufferStores of the original block, where the rfactor buffers will be
+ * created from
+ * \param factor_axis The `factor_axis` parameter of rfactor
+ * \param extent The extent (of the rfactor loop, for example) to insert
+ * \return The new created buffer
+ */
+Array<Buffer> CreateExpandedBuffers(const Array<BufferStore>& buf_stores, int factor_axis,
+                                    const PrimExpr& extent, const std::string& suffix = ".rf");
+
+/*!
  * \brief Replaces the buffer within the specific sequence of regions
  * \param regions The regions whose buffers are to be replaced
  * \param source The buffer to be replaced
@@ -164,6 +175,42 @@ class ReplaceBufferMutator : public StmtExprMutator {
   /*! \brief The block sref reuse map for the following replacement */
   Map<Block, Block>* block_sref_reuse_;
 };
+
+/******** Buffer Load Substitution ********/
+PrimExpr ReplaceBufferLoads(PrimExpr expr, std::function<PrimExpr(const BufferLoadNode*)> subst);
+
+Stmt ReplaceBufferLoads(Stmt stmt, std::function<PrimExpr(const BufferLoadNode*)> subst);
+
+/******** IterVar-related Mutations ********/
+
+/*!
+ * \brief Mutate and replace the block's BlockRealize.
+ * \note This action is not straightforward because ScheduleState only supports Block -> Block
+ * replacement. This function visits the AST starting from the parent of `block_sref` and applies
+ * `mutator` on the BlockRealize.
+ * \note This function does not work on the root block.
+ * \param self The schedule state
+ * \param block_sref The block sref to the block whose BlockRealize is to be mutated
+ * \param mutator The mutator function that takes a BlockRealize and returns a new BlockRealize
+ * \sa GetBlockRealize
+ */
+void MutateAndReplaceBlockRealize(ScheduleState& self, const StmtSRef& block_sref,
+                                  std::function<BlockRealize(BlockRealize)> mutator);
+
+/*!
+ * \brief Convert IterVars of a BlockRealize so that it has an IterVar that maps exactly to `var`.
+ * \details The original BlockRealize may have an IterVar that maps to `expr` which contains `var`.
+ * Split this IterVar into two parts: one that maps to `var`, and the other that maps to the rest of
+ * `expr`.
+ * \note This operation requires that only one IterVar's mapping contains `var`, which should be
+ * true if the block has affine binding. This property is not checked. It also assumes that `expr`
+ * is linear.
+ * \param br The BlockRealize
+ * \param var The variable to be split out
+ * \param range The range of the new IterVar
+ * \return A pair (the new BlockRealize, the new IterVar)
+ */
+std::pair<BlockRealize, IterVar> SplitVarFromIterVars(BlockRealize br, Var var, Range range);
 
 /******** Block Removal ********/
 

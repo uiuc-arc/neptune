@@ -198,6 +198,13 @@ class PVar : public Pattern<PVar<T>> {
   // Store PVars by reference in the expression.
   using Nested = const PVar<T>&;
 
+  // Don't move or copy PVar.
+  PVar() = default;
+  PVar(const PVar&) = delete;
+  PVar(PVar&&) = delete;
+  PVar& operator=(const PVar&) = delete;
+  PVar& operator=(PVar&&) = delete;
+
   void InitMatch_() const { filled_ = false; }
 
   bool Match_(const T& value) const {
@@ -845,7 +852,9 @@ struct PVscaleOp {
 template <typename... TPattern>
 class PMatchesOneOf {
  public:
-  explicit PMatchesOneOf(const TPattern&... patterns) : patterns_{patterns...} {}
+  explicit PMatchesOneOf(TPattern&&... patterns) : patterns_{std::forward<TPattern>(patterns)...} {}
+
+  void InitMatch_() const { InitEach(std::make_index_sequence<sizeof...(TPattern)>()); }
 
   /*! \brief Check if value matches one of the patterns.
    *
@@ -883,6 +892,11 @@ class PMatchesOneOf {
     return MatchImpl(value, cond, std::make_index_sequence<sizeof...(TPattern)>());
   }
 
+  inline size_t MatchedIndex() const {
+    ICHECK(matched_index_ != ~0U);
+    return matched_index_;
+  }
+
  private:
   template <typename NodeType, typename Condition>
   inline bool MatchImpl(const NodeType& value, Condition cond, std::index_sequence<>) const {
@@ -892,8 +906,16 @@ class PMatchesOneOf {
   template <typename NodeType, typename Condition, size_t FirstIndex, size_t... RemainingIndices>
   inline bool MatchImpl(const NodeType& value, Condition cond,
                         std::index_sequence<FirstIndex, RemainingIndices...>) const {
-    return std::get<FirstIndex>(patterns_).Match(value, cond) ||
-           MatchImpl(value, cond, std::index_sequence<RemainingIndices...>());
+    if (std::get<FirstIndex>(patterns_).Match(value, cond)) {
+      matched_index_ = FirstIndex;
+      return true;
+    }
+    return MatchImpl(value, cond, std::index_sequence<RemainingIndices...>());
+  }
+
+  template <size_t... Ix>
+  void InitEach(std::index_sequence<Ix...>) const {
+    (std::get<Ix>(patterns_).InitMatch_(), ...);
   }
 
   // Hold the patterns by const&.  This follows the same usage as both
@@ -905,7 +927,8 @@ class PMatchesOneOf {
   // without creating dangling references.  This may be improved in
   // the future by use of `constexpr` constructors/operators, allowing
   // more typical value semantics.
-  std::tuple<const TPattern&...> patterns_;
+  std::tuple<TPattern...> patterns_;
+  mutable size_t matched_index_{~0U};
 };
 
 /* \brief Return a proxy object that returns true after the first match
@@ -918,8 +941,8 @@ class PMatchesOneOf {
 template <typename... TPattern>
 inline std::enable_if_t<(std::is_base_of_v<Pattern<TPattern>, TPattern> && ... && true),
                         PMatchesOneOf<TPattern...>>
-matches_one_of(const TPattern&... patterns) {
-  return PMatchesOneOf<TPattern...>(patterns...);
+matches_one_of(TPattern&&... patterns) {
+  return PMatchesOneOf<TPattern...>(std::forward<TPattern>(patterns)...);
 }
 }  // namespace arith
 }  // namespace tvm

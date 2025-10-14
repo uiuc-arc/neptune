@@ -16,15 +16,18 @@
 # under the License.
 # pylint: disable=invalid-name
 """Internal PopenWorker for PopenPool."""
-import sys
+
+import logging
 import os
+import pickle
 import struct
+import sys
 import threading
 import traceback
-import pickle
-import logging
+
 import cloudpickle
 
+from tvm._ffi.base import TVMError
 from tvm.contrib.popen_pool import StatusKind
 
 
@@ -88,7 +91,11 @@ def main():
             ret_value = (StatusKind.COMPLETE, result)
         except Exception as exception:
             msg = traceback.format_exc()
-            ret_value = (StatusKind.EXCEPTION, type(exception)(msg))
+            try:
+                reformatted_exception = type(exception)(msg)
+            except TypeError:
+                reformatted_exception = TVMError(msg)
+            ret_value = (StatusKind.EXCEPTION, reformatted_exception)
 
         if timeout is not None:
             watcher.cancel()

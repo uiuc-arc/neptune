@@ -83,69 +83,64 @@ String GetRuleKindFromTarget(const Target& target) {
   throw;
 }
 
+void CloneRules(const SpaceGeneratorNode* src, SpaceGeneratorNode* dst) {
+  if (src->postprocs.defined()) {
+    Array<Postproc> original = src->postprocs.value();
+    Array<Postproc> postprocs;
+    postprocs.reserve(original.size());
+    for (const Postproc& postproc : original) {
+      postprocs.push_back(postproc->Clone());
+    }
+    dst->postprocs = std::move(postprocs);
+  }
+  if (src->mutator_probs.defined()) {
+    Map<Mutator, FloatImm> original = src->mutator_probs.value();
+    Map<Mutator, FloatImm> mutator_probs;
+    for (const auto& kv : original) {
+      mutator_probs.Set(kv.first->Clone(), kv.second);
+    }
+    dst->mutator_probs = std::move(mutator_probs);
+  }
+}
+
 void SpaceGeneratorNode::InitializeWithTuneContext(const TuneContext& context) {
-  if (context->target.defined() &&  //
-      !(sch_rules.defined() &&      //
-        postprocs.defined() &&      //
-        mutator_probs.defined())) {
+  if (context->target.defined()) {
     String kind = GetRuleKindFromTarget(context->target.value());
-    Array<ScheduleRule> default_sch_rules;
-    Array<Postproc> default_postprocs;
-    Map<Mutator, FloatImm> default_mutator_probs;
-    // for target with skylake-avx512
-    if (kind == "llvm") {
-      default_sch_rules = ScheduleRule::DefaultLLVM();
-      default_postprocs = Postproc::DefaultLLVM();
-      default_mutator_probs = Mutator::DefaultLLVM();
-    } else if (kind == "cuda") {
-      default_sch_rules = ScheduleRule::DefaultCUDA();
-      default_postprocs = Postproc::DefaultCUDA();
-      default_mutator_probs = Mutator::DefaultCUDA();
-    } else if (kind == "cuda-tensorcore") {
-      default_sch_rules = ScheduleRule::DefaultCUDATensorCore();
-      default_postprocs = Postproc::DefaultCUDATensorCore();
-      default_mutator_probs = Mutator::DefaultCUDATensorCore();
-    } else if (kind == "hexagon") {
-      default_sch_rules = ScheduleRule::DefaultHexagon();
-      default_postprocs = Postproc::DefaultHexagon();
-      default_mutator_probs = Mutator::DefaultHexagon();
-    } else if (kind == "vnni") {
-      default_sch_rules = ScheduleRule::DefaultX86("vnni");
-      default_postprocs = Postproc::DefaultCPUTensorization();
-      default_mutator_probs = Mutator::DefaultLLVM();
-    } else if (kind == "avx512") {
-      default_sch_rules = ScheduleRule::DefaultX86("avx512");
-      default_postprocs = Postproc::DefaultCPUTensorization();
-      default_mutator_probs = Mutator::DefaultLLVM();
-    } else if (kind == "c") {
-      default_sch_rules = ScheduleRule::DefaultMicro();
-      default_postprocs = Postproc::DefaultMicro();
-      default_mutator_probs = Mutator::DefaultMicro();
-    } else if (kind == "asimd") {
-      default_sch_rules = ScheduleRule::DefaultARM("neon");
-      default_postprocs = Postproc::DefaultCPUTensorization();
-      default_mutator_probs = Mutator::DefaultLLVM();
-    } else if (kind == "dotprod") {
-      default_sch_rules = ScheduleRule::DefaultARM("dotprod");
-      default_postprocs = Postproc::DefaultCPUTensorization();
-      default_mutator_probs = Mutator::DefaultLLVM();
-    } else {
-      LOG(FATAL) << "Unsupported kind: " << kind;
-      throw;
-    }
-    if (!sch_rules.defined()) {
-      sch_rules = default_sch_rules;
-    }
     if (!postprocs.defined()) {
-      postprocs = default_postprocs;
+      if (kind == "llvm") {
+        // for target with skylake-avx512
+        postprocs = Postproc::DefaultLLVM();
+      } else if (kind == "cuda") {
+        postprocs = Postproc::DefaultCUDA();
+      } else if (kind == "cuda-tensorcore") {
+        postprocs = Postproc::DefaultCUDATensorCore();
+      } else if (kind == "hexagon") {
+        postprocs = Postproc::DefaultHexagon();
+      } else if (kind == "vnni" || kind == "avx512" || kind == "asimd" || kind == "dotprod") {
+        postprocs = Postproc::DefaultCPUTensorization();
+      } else if (kind == "c") {
+        postprocs = Postproc::DefaultMicro();
+      } else {
+        LOG(FATAL) << "Unsupported kind: " << kind;
+        throw;
+      }
     }
     if (!mutator_probs.defined()) {
-      mutator_probs = default_mutator_probs;
-    }
-  }
-  if (sch_rules.defined()) {
-    for (ScheduleRule i : sch_rules.value()) {
-      i->InitializeWithTuneContext(context);
+      if (kind == "llvm" || kind == "vnni" || kind == "avx512" || kind == "asimd" ||
+          kind == "dotprod") {
+        mutator_probs = Mutator::DefaultLLVM();
+      } else if (kind == "cuda") {
+        mutator_probs = Mutator::DefaultCUDA();
+      } else if (kind == "cuda-tensorcore") {
+        mutator_probs = Mutator::DefaultCUDATensorCore();
+      } else if (kind == "hexagon") {
+        mutator_probs = Mutator::DefaultHexagon();
+      } else if (kind == "c") {
+        mutator_probs = Mutator::DefaultMicro();
+      } else {
+        LOG(FATAL) << "Unsupported kind: " << kind;
+        throw;
+      }
     }
   }
   if (postprocs.defined()) {
@@ -154,8 +149,7 @@ void SpaceGeneratorNode::InitializeWithTuneContext(const TuneContext& context) {
     }
   }
   if (mutator_probs.defined()) {
-    for (const auto& kv : mutator_probs.value()) {
-      Mutator mutator = kv.first;
+    for (const auto& [mutator, _] : mutator_probs.value()) {
       mutator->InitializeWithTuneContext(context);
     }
   }
@@ -179,12 +173,10 @@ SpaceGenerator PySpaceGeneratorNode::Clone() const {
 }
 
 SpaceGenerator SpaceGenerator::PySpaceGenerator(
-    Optional<Array<ScheduleRule>> sch_rules, Optional<Array<Postproc>> postprocs,
-    Optional<Map<Mutator, FloatImm>> mutator_probs,
+    Optional<Array<Postproc>> postprocs, Optional<Map<Mutator, FloatImm>> mutator_probs,
     FInitializeWithTuneContext f_initialize_with_tune_context,
     FGenerateDesignSpace f_generate_design_space, FClone f_clone) {
   ObjectPtr<PySpaceGeneratorNode> n = make_object<PySpaceGeneratorNode>();
-  n->sch_rules = sch_rules;
   n->postprocs = postprocs;
   n->mutator_probs = mutator_probs;
   n->f_initialize_with_tune_context = std::move(f_initialize_with_tune_context);

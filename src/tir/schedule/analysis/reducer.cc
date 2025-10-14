@@ -511,6 +511,36 @@ std::pair<Array<PrimExpr>, Array<BufferStore>> GetInitValuesAndUpdatesFromReduct
   return std::make_pair(init_values, updates);
 }
 
+SelfReductionMatchResult MatchSelfReduction(const Optional<ScheduleState>& self, const Block& block,
+                                            std::optional<size_t> write_index) {
+  // Match reduction and get the i-th BufferStore.
+  auto [inits, updates] = GetInitValuesAndUpdatesFromReductionBlock(self, block);
+  ICHECK(inits.size() == updates.size());
+  size_t write_index_;
+  if (write_index.has_value()) {
+    ICHECK(0 <= write_index && write_index < updates.size())
+        << "Invalid write_index = " << write_index << "; expected 0 <= write_buffer_index < "
+        << updates.size();
+    write_index_ = write_index.value();
+  } else {
+    ICHECK_EQ(updates.size(), 1) << "The block must have exactly one write buffer";
+    write_index_ = 0;
+  }
+  auto [reducer, combiners_lhs, combiners_rhs] = GetReducerAndCombinerLhsRhs(self, inits, updates);
+  PrimExpr init_value = inits[write_index_];
+  BufferStore update = updates[write_index_];
+  PrimExpr combiner_lhs = combiners_lhs[write_index_];
+  PrimExpr combiner_rhs = combiners_rhs[write_index_];
+
+  // Check self-reduction: `LHS = f(LHS, rhs)`.
+  BufferLoad store_load(update->buffer, update->indices);
+  ICHECK(arith::PConst<PrimExpr>(store_load).Match(combiner_lhs))
+      << "Only self reduction is supported, got out_region = " << store_load
+      << " and lhs_region = " << combiner_lhs;
+  return SelfReductionMatchResult{reducer, init_value, update, Downcast<BufferLoad>(combiner_lhs),
+                                  combiner_rhs};
+}
+
 bool ContainsOnlyDataParAndReductionBlockIter(const Array<IterVar>& iters) {
   for (const IterVar& iter_var : iters) {
     if (iter_var->iter_type != kDataPar && iter_var->iter_type != kCommReduce) {

@@ -17,12 +17,11 @@
  * under the License.
  */
 #include <tvm/tir/data_type_rewriter.h>
+#include <tvm/tir/transform.h>
 
 #include <functional>
 
-#include "../../transforms/simplify.h"
 #include "../ir_comparator.h"
-#include "../utils.h"
 
 namespace tvm {
 namespace tir {
@@ -30,10 +29,6 @@ namespace tir {
 template <class T>
 bool UsesVar(const T& x, const Var& var) {
   return UsesVar(x, [tgt = var.get()](const VarNode* v) { return v == tgt; });
-}
-
-Range RangeFromExtent(const PrimExpr& extent) {
-  return Range::FromMinExtent(make_zero(extent->dtype), extent);
 }
 
 template <class T>
@@ -236,7 +231,7 @@ Map<Var, PrimExpr> DeriveBlockBinding(const Array<IterVar>& iter_vars,          
       ICHECK(
           ana.CanProveEqual(outer_bindings->operator[](i), NormalizeIterMapToExpr(outer_binding)));
     } else {
-      outer_iter = IterVar(/*dom=*/RangeFromExtent(outer_mark->extent),
+      outer_iter = IterVar(/*dom=*/Range::FromExtent(outer_mark->extent),
                            /*var=*/iter_var->var.copy_with_suffix("_o"),
                            /*iter_type=*/iter_var->iter_type);
       outer_bindings->push_back(NormalizeIterMapToExpr(outer_binding));
@@ -254,7 +249,7 @@ Map<Var, PrimExpr> DeriveBlockBinding(const Array<IterVar>& iter_vars,          
       }
     } else {
       // create iter var for the inner block
-      IterVar inner_iter(/*dom=*/RangeFromExtent(inner_mark->extent),
+      IterVar inner_iter(/*dom=*/Range::FromExtent(inner_mark->extent),
                          /*var=*/iter_var->var.copy_with_suffix("_i"),
                          /*iter_type=*/iter_var->iter_type);
       inner_bindings->push_back(NormalizeIterMapToExpr(inner_binding));
@@ -429,7 +424,7 @@ Array<BufferRegion> EvalSetRegions(const Array<BufferRegion>& regions,
     Array<Range> new_region;
     new_region.reserve(ndim);
     for (int i = 0; i < ndim; ++i) {
-      new_region.push_back(relaxed[i].CoverRange(RangeFromExtent(buffer->shape[i])));
+      new_region.push_back(relaxed[i].CoverRange(Range::FromExtent(buffer->shape[i])));
     }
     results.push_back(BufferRegion(buffer, new_region));
   }

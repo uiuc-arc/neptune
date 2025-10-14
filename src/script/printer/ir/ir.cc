@@ -18,6 +18,7 @@
  */
 #include <tvm/ir/tensor_type.h>
 
+#include "../tir/utils.h"
 #include "./utils.h"
 
 namespace tvm {
@@ -209,8 +210,11 @@ TVM_SCRIPT_REPR(DictAttrsNode, ReprPrintIR);
 TVM_SCRIPT_REPR(RelayRefTypeNode, ReprPrintIR);
 TVM_SCRIPT_REPR(FuncTypeNode, ReprPrintIR);
 TVM_SCRIPT_REPR(IncompleteTypeNode, ReprPrintIR);
-TVM_SCRIPT_REPR(RangeNode, ReprPrintIR);
 TVM_SCRIPT_REPR(IRModuleNode, ReprPrintIRModule);
+
+// HACK: because `Range` objects often hold TIR variables (tir.Var), we need to use `ReprPrintTIR`
+// which will do all the setup to print variables correctly.
+TVM_SCRIPT_REPR(RangeNode, ReprPrintTIR);
 
 }  // namespace printer
 }  // namespace script

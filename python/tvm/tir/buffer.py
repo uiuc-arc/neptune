@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Abstraction for array data structures."""
+
 from numbers import Integral
 
 import tvm._ffi
@@ -98,7 +99,12 @@ class Buffer(Object, Scriptable):
         offset = convert(offset)
         extent = convert(extent)
         return _ffi_api.BufferAccessPtr(
-            self, access_mask, ptr_type, content_lanes, offset, extent  # type: ignore
+            self,
+            access_mask,
+            ptr_type,
+            content_lanes,
+            offset,
+            extent,  # type: ignore
         )
 
     def vload(self, begin, dtype=None, predicate=None):
@@ -188,38 +194,55 @@ class Buffer(Object, Scriptable):
 
     def __getitem__(self, indices):
         from ..arith import Analyzer  # pylint: disable=import-outside-toplevel
-        from .expr import BufferLoad, Ramp, const  # pylint: disable=import-outside-toplevel
+        from .expr import BufferLoad, IntImm, Ramp, const  # pylint: disable=import-outside-toplevel
         from .stmt import BufferRegion  # pylint: disable=import-outside-toplevel
 
         if not isinstance(indices, (tuple, list)):
             indices = [indices]
-        has_slice = any(isinstance(i, slice) for i in indices)
-        has_step = any(isinstance(i, slice) and i.step is not None for i in indices)
         analyzer = Analyzer()
-        if has_slice and not has_step:
-            region = []
-            for i, index in enumerate(indices):
-                if isinstance(index, slice):
-                    start = 0 if index.start is None else index.start
-                    stop = self.shape[i] if index.stop is None else index.stop
+
+        def normalize_slice(index: slice):
+            start = 0 if index.start is None else index.start
+            stop = self.shape[i] if index.stop is None else index.stop
+            step = 1 if index.step is None else index.step
+            # We should ensure the dtype of start is the same with that of step.
+            if isinstance(start, PrimExpr) and isinstance(step, int):
+                step = IntImm(start.dtype, step)
+            return start, stop, step
+
+        def scalar_to_range(idx):
+            if isinstance(idx, int):
+                idx = IntImm("int32", idx)
+            assert isinstance(idx, PrimExpr), f"Unsupported index {idx} of type {type(idx)}"
+            return Range.from_min_extent(idx, const(1, idx.dtype))
+
+        # HACK: we're parsing __getitem__ into one of 2 cases depending on what data type
+        # can hold `indices`. There has to be a better way to distinguish these cases.
+        slices = [idx for idx in indices if isinstance(idx, slice)]
+        has_step = any(idx.step is not None for idx in slices)
+        has_none = any(idx is None for idx in indices)
+        if (slices and not has_step) or has_none:
+            # Case 1: return a BufferRegion.
+            region, output_map = [], []
+            input_dim = 0
+            for idx in indices:
+                if isinstance(idx, slice):
+                    start, stop, step = normalize_slice(idx)
                     region.append(Range.from_min_extent(start, analyzer.simplify(stop - start)))
+                    output_map.append(input_dim)
+                    input_dim += 1
+                elif idx is None:
+                    output_map.append(None)
                 else:
-                    region.append(
-                        Range.from_min_extent(
-                            index, const(1, index.dtype) if isinstance(index, PrimExpr) else 1
-                        )
-                    )
-            return BufferRegion(self, region)
+                    region.append(scalar_to_range(idx))
+                    input_dim += 1
+            return BufferRegion(self, region, output_map)
         else:
+            # Case 2: return a BufferLoad.
             expr_indices = []
             for i, index in enumerate(indices):
                 if isinstance(index, slice):
-                    start = 0 if index.start is None else index.start
-                    stop = self.shape[i] if index.stop is None else index.stop
-                    step = 1 if index.step is None else index.step
-                    # We should ensure the dtype of start is the same with that of step.
-                    if isinstance(start, tvm.tir.expr.PrimExpr) and isinstance(step, int):
-                        step = tvm.tir.expr.IntImm(start.dtype, step)
+                    start, stop, step = normalize_slice(index)
                     lanes = analyzer.simplify((stop - start + step - 1) // step)
                     if lanes == 1:
                         expr_indices.append(start)

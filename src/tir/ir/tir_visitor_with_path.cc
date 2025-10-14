@@ -140,11 +140,6 @@ void TIRVisitorWithPath::Visit(const Buffer& buffer, ObjectPath path) {
   Visit(buffer->elem_offset, path->Attr("elem_offset"));
 }
 
-void TIRVisitorWithPath::Visit(const BufferRegion& region, ObjectPath path) {
-  Visit(region->buffer, path->Attr("buffer"));
-  Visit(region->region, path->Attr("region"));
-}
-
 void TIRVisitorWithPath::Visit(const MatchBufferRegion& match, ObjectPath path) {
   Visit(match->source, path->Attr("source"));
 
@@ -244,6 +239,11 @@ void TIRVisitorWithPath::VisitStmt_(const BufferStoreNode* op, ObjectPath path) 
   Visit(op->value, path->Attr("value"));
   Visit(op->buffer, path->Attr("buffer"));
   Visit(op->indices, path->Attr("indices"));
+}
+
+void TIRVisitorWithPath::VisitStmt_(const BufferRegionStoreNode* op, ObjectPath path) {
+  Visit(op->region, path->Attr("region"));
+  Visit(op->value, path->Attr("value"));
 }
 
 void TIRVisitorWithPath::VisitStmt_(const BufferRealizeNode* op, ObjectPath path) {
@@ -348,6 +348,11 @@ void TIRVisitorWithPath::VisitExpr_(const AnyNode* op, ObjectPath path) {}
 void TIRVisitorWithPath::VisitExpr_(const BufferLoadNode* op, ObjectPath path) {
   Visit(op->buffer, path->Attr("buffer"));
   Visit(op->indices, path->Attr("indices"));
+}
+
+void TIRVisitorWithPath::VisitExpr_(const BufferRegionNode* op, ObjectPath path) {
+  Visit(op->buffer, path->Attr("buffer"));
+  Visit(op->region, path->Attr("region"));
 }
 
 void TIRVisitorWithPath::VisitExpr_(const ProducerLoadNode* op, ObjectPath path) {

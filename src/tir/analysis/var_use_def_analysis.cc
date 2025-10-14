@@ -82,6 +82,11 @@ void VarUseDefAnalyzer::VisitStmt_(const BufferStoreNode* op) {
   StmtExprVisitor::VisitStmt_(op);
 }
 
+void VarUseDefAnalyzer::VisitStmt_(const BufferRegionStoreNode* op) {
+  HandleUse(op->region->buffer);
+  StmtExprVisitor::VisitStmt_(op);
+}
+
 void VarUseDefAnalyzer::VisitExpr_(const LetNode* op) {
   // Weaker SSA condition
   // A single var can be binded in multiple lets
@@ -114,6 +119,11 @@ void VarUseDefAnalyzer::VisitExpr_(const ReduceNode* op) {
 }
 
 void VarUseDefAnalyzer::VisitExpr_(const BufferLoadNode* op) {
+  HandleUse(op->buffer);
+  StmtExprVisitor::VisitExpr_(op);
+}
+
+void VarUseDefAnalyzer::VisitExpr_(const BufferRegionNode* op) {
   HandleUse(op->buffer);
   StmtExprVisitor::VisitExpr_(op);
 }

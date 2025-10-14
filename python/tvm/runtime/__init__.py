@@ -30,6 +30,7 @@ from .profiling import Report
 from .ndarray import device, cpu, cuda, gpu, opencl, cl, vulkan, metal, mtl
 from .ndarray import vpi, rocm, ext_dev
 from .module import load_module, enabled, system_lib, load_static_library
+from .cuda_rocm_utils import create_cuda_module, create_rocm_module
 from .container import String, ShapeTuple  # , BoxBool
 from .object_generic import convert_to_object, convert, const
 from .params import (

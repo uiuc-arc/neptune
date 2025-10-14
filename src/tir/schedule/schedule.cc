@@ -223,6 +223,10 @@ TVM_REGISTER_GLOBAL("tir.schedule.ScheduleDecomposeReduction")
     .set_body_method<Schedule>(&ScheduleNode::DecomposeReduction);
 TVM_REGISTER_GLOBAL("tir.schedule.ScheduleRFactor")
     .set_body_method<Schedule>(&ScheduleNode::RFactor);
+TVM_REGISTER_GLOBAL("tir.schedule.ScheduleRollingUpdate")
+    .set_body_method<Schedule>(&ScheduleNode::RollingUpdate);
+TVM_REGISTER_GLOBAL("tir.schedule.ScheduleSplitKUpdate")
+    .set_body_method<Schedule>(&ScheduleNode::SplitKUpdate);
 /******** (FFI) Block annotation ********/
 TVM_REGISTER_GLOBAL("tir.schedule.ScheduleStorageAlign")
     .set_body_method<Schedule>(&ScheduleNode::StorageAlign);
@@ -305,11 +309,19 @@ TVM_REGISTER_GLOBAL("tir.schedule.SchedulePadEinsum")
 /******** (FFI) Buffer transformation ********/
 TVM_REGISTER_GLOBAL("tir.schedule.ScheduleRollingBuffer")
     .set_body_method<Schedule>(&ScheduleNode::RollingBuffer);
+TVM_REGISTER_GLOBAL("tir.schedule.ScheduleSplitScanBuffer")
+    .set_body_method<Schedule>(&ScheduleNode::SplitScanBuffer);
 /******** (FFI) Misc ********/
 TVM_REGISTER_GLOBAL("tir.schedule.ScheduleEnterPostproc")
     .set_body_method<Schedule>(&ScheduleNode::EnterPostproc);
+TVM_REGISTER_GLOBAL("tir.schedule.SchedulePropagateIfThenElse")
+    .set_body_method<Schedule>(&ScheduleNode::PropagateIfThenElse);
 TVM_REGISTER_GLOBAL("tir.schedule.ScheduleUnsafeHideBufferAccess")
     .set_body_method<Schedule>(&ScheduleNode::UnsafeHideBufferAccess);
-
+/******** (FFI) Function passes ********/
+TVM_REGISTER_GLOBAL("tir.schedule.ScheduleCompactBuffer")
+    .set_body_method<Schedule>(&ScheduleNode::CompactBuffer);
+TVM_REGISTER_GLOBAL("tir.schedule.ScheduleToTileExprForm")
+    .set_body_method<Schedule>(&ScheduleNode::ToTileExprForm);
 }  // namespace tir
 }  // namespace tvm

@@ -20,7 +20,9 @@
 #define TVM_TIR_SCHEDULE_PRIMITIVE_H_
 
 #include <tvm/support/random_engine.h>
+#include <tvm/tir/schedule/schedule.h>
 #include <tvm/tir/schedule/state.h>
+#include <tvm/tir/schedule/utils.h>
 
 #include <vector>
 
@@ -481,6 +483,13 @@ TVM_DLL void ComputeAt(ScheduleState self, const StmtSRef& block_sref, const Stm
  */
 TVM_DLL void ReverseComputeAt(ScheduleState self, const StmtSRef& block_sref,
                               const StmtSRef& loop_sref, bool preserve_unit_loops, int index = -1);
+
+//! \brief A version of ReverseComputeAt that doesn't check reduction completeness. It allows fusing
+//! a reduction block into the reduction loops of another reduction block (which produces wrong
+//! result.)
+void UnsafeReverseComputeAt(ScheduleState self, const StmtSRef& block_sref,
+                            const StmtSRef& loop_sref, bool preserve_unit_loops, int index = -1);
+
 /*!
  * \brief Inline a block into its consumer(s). It requires:
  * 1) The block is a complete non-root block, which only produces one buffer
@@ -506,6 +515,15 @@ TVM_DLL void ComputeInline(ScheduleState self, const StmtSRef& block_sref);
  * \param block_sref The sref to the block to be inlined to its producer
  */
 TVM_DLL void ReverseComputeInline(ScheduleState self, const StmtSRef& block_sref);
+
+/*!
+ * \brief reverse-compute-root. Move a block downward (runs after the current loop nest)
+ * and outward (directly under the root block).
+ * \param self The state of the schedule
+ * \param block_sref The block to be moved to the root of the scope
+ */
+TVM_DLL void ReverseComputeRoot(ScheduleState self, const StmtSRef& block_sref);
+
 /******** Schedule: Reduction ********/
 /*!
  * \brief Decompose a reduction block into two separate blocks.
@@ -533,9 +551,134 @@ TVM_DLL StmtSRef DecomposeReduction(ScheduleState self, const StmtSRef& block_sr
  *                    buffer. Suppose the original reduction block writes to buffer `B` with
  *                    ndim(B) dimensions, then `factor_axis` should be in range `[-ndim(B) - 1,
  *                    ndim(B)]`, and the negative index will be normalized to a non-negative one
+ * \param merge_loops Whether to merge the loop nests of the rfactor block and the original
+ *                    (write-back) block. If true, they will be merged at `loop_sref`; otherwise,
+ *                    these blocks will be separated.
  * \return The sref of the rfactor block
  */
-TVM_DLL StmtSRef RFactor(ScheduleState self, const StmtSRef& loop_sref, int factor_axis);
+TVM_DLL StmtSRef RFactor(ScheduleState self, const StmtSRef& loop_sref, int factor_axis,
+                         bool merge_loops);
+
+/*!
+ \brief Generalized operator fusion. Fuses and r-factors (see TVM \ref RFactor) a reduction block
+ under a reduction loop.
+
+ \details RollingUpdate allows fusing a block `b0 := block_sref` into reduction loops (loops that
+ some blocks have reduction iter-vars on). This transformation normally would not be possible
+ because `b0` would receive *incomplete* outputs from these blocks. To make it valid,
+ RollingUpdate performs a generalized FlashAttention-style algebraic rewrite.
+
+ We first note that RollingUpdate produces two blocks from `b0` because it r-factors `b0`: an
+ r-factor (rf) block and a write-back (wb) block. The algorithm is as follows:
+
+ 1. Walk the DFG from `b0` to find the _reduce producers_ of `b0`, which we call `Br`.
+    `Br` is the set of blocks that satisfy the `IsIncompleteUnderLoop` condition: the block has
+    reduction (or scan) iter-vars that use the target loop `l := loop_sref`. Note that `Br` is
+    automatically a frontier, because once we find a fitting block, we don't walk farther.
+    In this walk, also produce a topological order of the blocks between `b0` and `Br` (including
+    `b0` and excluding `Br`), which we call `Bt`. It's implied that all blocks in `Bt` are spatial
+    blocks.
+ 2. Fuse all blocks under `l` in the order of `Bt` (ignore those already under `l`). Fusion is
+    achieved with our backdoored version of reverse-compute-at (see \ref UnsafeReverseComputeAt).
+ 3. Apply \ref ReduceToScan to convert each reduction block in `Br` into a scan block (ignore blocks
+    that are already scan).
+ 4. Algebraic rewrite starts. Our goal is to "fix" `b0` so that it can work with incomplete results
+    from its producers.
+    To focus on the expression instead of the loop structure, we "mock-inline" all of `Bt` (in
+    topological order, which they are already in), which should bring all the computation into `b0`
+    (call the new block `b0_new`).
+    Then, match `b0_new` against a reduction pattern `out[i...] = f(out[i...], in[i..., j])`,
+    and extract `f`, `out[i...]`, and `in[i..., j]`.
+    Produce a *reduce-repairer* function from them, which we will use next.
+ 5. Run \ref RFactor to factorize `b0` over `l`. Note that `b0` is already under `l` because it is
+    contained in `Bt`, and all of `Bt` have been fused under `l`.
+    RFactor produces an r-factor block `brf` and a write-back block `bwb`.
+    We use an internal version of RFactor that has the same behavior but returns more information.
+ 6. Apply the reduce-repairer function we extracted to `bwb`. It rewrites the RHS of the only
+    BufferStore in `bwb`, replacing it with a new expr that produces the correct results.
+
+ \sa SplitKUpdate
+
+ \warning RollingUpdate changes the output of the `Bt` spatial blocks by fusing them under the loop
+ `l`. A fully correct RollingUpdate impl should inline all `Bt` blocks, but inlining can be bad for
+ performance or break codegen. In this implementation, if any block that is not roll-updated uses
+ one of the `Bt` blocks, the output of that block will be wrong.
+ A correct implementation should make a copy of each of `Bt` blocks (along with their output
+ buffers), redirect `b0` to use the copied buffer, and fuse these new blocks into `l`.
+
+ \note The algebraic rewrite in RollingUpdate always require `b0` itself to be a reduction block.
+ In addition, this rewrite is not always possible. RollingUpdate fails if a rewrite is not found.
+
+ \note We require that the entire set of blocks `Bt` be rev-compute-at-able into `l` AND inlinable
+ into `b0`. We will perform both mock-inline and actual rev-compute-at on all of them.
+
+ \param self The state of the schedule
+ \param block_sref The block to operate on (the `b0` in the description above)
+ \param loop_sref The loop under which the block is fused (the `l` in the description above)
+ \param factor_axis The position where the new dimension is placed in the new introduced rfactor
+        buffer. See \ref RFactor for more details.
+ \return The newly created rfactor block. The write-back block is repurposed from `b0`, and its
+ StmtSRef is still valid.
+*/
+TVM_DLL StmtSRef RollingUpdate(ScheduleState self, const StmtSRef& block_sref,
+                               const StmtSRef& loop_sref, int factor_axis);
+
+/*!
+ \brief Generalized operator fusion similar to \ref RollingUpdate, but places the r-factor block and
+ write-back block in separate loop nests. SplitKUpdate is good for not creating a scan dependency,
+ so you can parallelize more loops later if desired.
+
+ \details SplitKUpdate also allows fusing a block `b0 := block_sref` into reduction loops like
+ RollingUpdate does, but it separates the r-factor and write-back blocks in two loop nests. The
+ r-factor block is under `l`, and the write-back block is under the root block with its own loop
+ nest. The name "SplitK" comes from the fact that the loop `l` is parallelizable like the `k`
+ dimension in a _split-k matmul_, because SplitKUpdate does not create a scan dependency on `l`.
+ The algorithm is as follows:
+
+ 1. Similar to RollingUpdate step 1, walk the DFG from `b0` to find the _reduce producers_ `Bf` and
+    the topological order `Bt`. However, there are 2 differences from RollingUpdate:
+
+    - SplitKUpdate allows some `Bf` blocks to be after the loop `l` (which is entirely not possible
+      in RollingUpdate).
+    - SplitKUpdate requires _all_ of `Bf` to have been generated by previous calls to SplitKUpdate.
+      This is because SplitKUpdate needs to know the corresponding r-factor block on seeing a
+      write-back block, and vice versa. All of `Bf` should have an annotation that indicates this
+      and point to its partner block (r-factor block for a write-back block, and vice versa).
+
+    Build a buffer substitution map `wb_to_rf` that maps blocks in `Bf` that identify as write-back
+    blocks to their r-factor blocks.
+
+ 2. Foreach block `b` in `Bt`, substitute its buffer reads using `wb_to_rf`, then fuse it under `l`
+    using \ref UnsafeReverseComputeAt.
+
+ 3. Algebraic rewrite: similar to RollingUpdate step 4, mock-inline, then generate a
+    `ReduceRepairer` function.
+
+ 4. Run \ref RFactor to factorize `b0` over `l`. In this process, add the "partner" annotation to
+ the r-factor and write-back block that are being generated.
+
+ 5. Apply the `ReduceRepairer` function to the write-back block in a different way so that the
+ updated expression is still an associative reduction. (See the code for details.)
+
+ 6. Pull the write-back block (now under `l`) out to root position, using \ref ReverseComputeRoot.
+
+ \sa RollingUpdate
+
+ \warning This SplitKUpdate suffers from the same incorrectness as RollingUpdate (see the warning
+ there). A fully correct version would copy all of `Bt` blocks, then redirect `b0` to use the
+ copied buffers.
+
+ \param self The state of the schedule
+ \param block_sref The block to operate on (the `b0` in the description above)
+ \param loop_sref The loop under which the block is fused (the `l` in the description above)
+ \param factor_axis The position where the new dimension is placed in the new introduced rfactor
+        buffer. See \ref RFactor for more details.
+ \return The newly created rfactor block. The write-back block is repurposed from `b0`, and its
+ StmtSRef is still valid.
+*/
+TVM_DLL StmtSRef SplitKUpdate(ScheduleState self, const StmtSRef& block_sref,
+                              const StmtSRef& loop_sref, int factor_axis);
+
 /******** Schedule: Block annotation ********/
 
 /*!
@@ -706,7 +849,26 @@ TVM_DLL void PadEinsum(ScheduleState self, const StmtSRef& block_sref,
  * \param write_buffer_index The index of the buffer in block's write region.
  */
 TVM_DLL void RollingBuffer(ScheduleState self, const StmtSRef& block_sref, int write_buffer_index);
+
+TVM_DLL void ReduceToScan(ScheduleState self, const StmtSRef& block_sref, const StmtSRef& loop_sref,
+                          int write_buffer_index, int axis);
+
+TVM_DLL Array<StmtSRef> SplitScanBuffer(ScheduleState self, const StmtSRef& block_sref,
+                                        const StmtSRef& loop_sref, int write_buffer_index);
+
 /******** Schedule: Misc ********/
+
+/*!
+ \brief Propagate if-then-else condition of the given block to all blocks under the loop, then
+   try to extract a common condition and lift it closer to the loop.
+ \sa See `tir::PropagateIfThenElse` for more details.
+ \param block_sref The block to extract the condition from.
+ \param loop_sref The loop context for propagation.
+ \param registered_handler A registered Python function that generates a TIR kernel to handle
+   any runtime condition.
+*/
+TVM_DLL void PropagateIfThenElse(ScheduleState self, const StmtSRef& block_sref,
+                                 const StmtSRef& loop_sref, String registered_handler);
 
 /*!
  * \brief Hide some buffer access in the given block.
@@ -717,6 +879,28 @@ TVM_DLL void RollingBuffer(ScheduleState self, const StmtSRef& block_sref, int w
  */
 TVM_DLL void UnsafeHideBufferAccess(ScheduleState self, const StmtSRef& block_sref,
                                     const String& buf_type, const Array<IntImm>& buf_index_array);
+
+TVM_DLL void PropagateCond(ScheduleState self, const StmtSRef& loop_sref);
+
+/******** Schedule: Function passes (buffer compactification, loop-tile conversion) ********/
+
+/*! \brief Automatically blockize a TVM TensorIR program in a way that assists later tensorization.
+ * This pass adds trivial blocks:
+ * - around \ref SeqStmt,
+ * - between the innermost threadblock binding loop and the outermost "regular" loop, and
+ * - inside \ref For loops given in loop_hints.
+ *
+ * This pass should typically run after \ref PlanAndUpdateBufferAllocationLocation (which adds
+ * blocks at buffer allocation sites). The blocks added by our pass and that pass together should
+ * clearly mark "inner" and "outer" loops, so that blocks can be easily tensorized with its inner
+ * loops later.
+ * If the threadblock/thread binding of the program is inconsistent, it's also recommended to run
+ * \ref LiftThreadBinding first.
+ */
+TVM_DLL PrimFunc TileExprAutoBlockize(PrimFunc func, Array<StmtSRef> loop_hints,
+                                      BlockMap* block_map);
+
+TVM_DLL Stmt TensorizeIntoTileExpr(Stmt body, BlockMap* block_map);
 
 }  // namespace tir
 }  // namespace tvm

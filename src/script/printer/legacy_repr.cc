@@ -239,7 +239,7 @@ TVM_STATIC_IR_FUNCTOR(ReprLegacyPrinter, vtable)
       auto* op = static_cast<const VarNode*>(node.get());
       // omit the type
       // stream << op->name << "." << op->type;
-      (*p) << op->name_hint;
+      (*p) << op->name_hint << "(" << op << ")";
     });
 
 TVM_STATIC_IR_FUNCTOR(ReprLegacyPrinter, vtable)

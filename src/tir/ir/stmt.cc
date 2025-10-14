@@ -564,6 +564,17 @@ TVM_REGISTER_GLOBAL("tir.BufferStore")
 
 TVM_REGISTER_NODE_TYPE(BufferStoreNode);
 
+// BufferRegionStore
+BufferRegionStore::BufferRegionStore(BufferRegion region, PrimExpr value, Span span)
+    : Stmt(make_object<BufferRegionStoreNode>(region, value, span)) {}
+
+TVM_REGISTER_GLOBAL("tir.BufferRegionStore")
+    .set_body_typed([](BufferRegion region, PrimExpr value, Span span) {
+      return BufferRegionStore(region, value, span);
+    });
+
+TVM_REGISTER_NODE_TYPE(BufferRegionStoreNode);
+
 // BufferRealize
 BufferRealize::BufferRealize(Buffer buffer, Array<Range> bounds, PrimExpr condition, Stmt body,
                              Span span) {
@@ -575,44 +586,6 @@ TVM_REGISTER_GLOBAL("tir.BufferRealize")
                        Span span) { return BufferRealize(buffer, bounds, condition, body, span); });
 
 TVM_REGISTER_NODE_TYPE(BufferRealizeNode);
-
-// BufferRegion
-BufferRegion::BufferRegion(Buffer buffer, Array<Range> region) {
-  CHECK_EQ(buffer->shape.size(), region.size())
-      << "The dimension between " << buffer << " and region " << region
-      << " mismatched, the buffer is " << buffer;
-  ObjectPtr<BufferRegionNode> node = make_object<BufferRegionNode>();
-  node->buffer = std::move(buffer);
-  node->region = std::move(region);
-  data_ = std::move(node);
-}
-
-BufferRegion BufferRegion::FullRegion(Buffer buffer) {
-  Array<Range> region;
-  for (PrimExpr extent : buffer->shape) {
-    region.push_back(Range::FromMinExtent(0, extent));
-  }
-  return BufferRegion(buffer, region);
-}
-
-BufferRegion BufferRegion::FromPoint(Buffer buffer, Array<PrimExpr> indices) {
-  Array<Range> region;
-  for (const PrimExpr& index : indices) {
-    if (const RampNode* ramp_index = index.as<RampNode>()) {
-      region.push_back(
-          Range::FromMinExtent(ramp_index->base, ramp_index->stride * ramp_index->lanes));
-    } else {
-      region.push_back(Range::FromMinExtent(index, make_const(index.dtype(), 1)));
-    }
-  }
-  return BufferRegion(buffer, region);
-}
-
-TVM_REGISTER_GLOBAL("tir.BufferRegion").set_body_typed([](Buffer buffer, Array<Range> region) {
-  return BufferRegion(buffer, region);
-});
-
-TVM_REGISTER_NODE_TYPE(BufferRegionNode);
 
 // MatchBufferRegion
 MatchBufferRegion::MatchBufferRegion(Buffer buffer, BufferRegion source) {

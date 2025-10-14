@@ -17,10 +17,12 @@
 """Wrapping existing transformations."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 
-
 import enum
 from typing import Callable, Optional
 
+from tvm.ir import IRModule
+
+from .. import PrimExpr
 from . import _ffi_api
 from . import function_pass as _fpass
 
@@ -467,6 +469,29 @@ def MakePackedAPI():
     return _ffi_api.MakePackedAPI()  # type: ignore
 
 
+def TritonBuildKernel():
+    """Build Triton kernel as a runtime::Module, and inject it into the attribute of the IRModule.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.TritonBuildKernel()  # type: ignore
+
+
+def TritonCollectKernel(mod: IRModule) -> dict[str, tuple[str, int, int, list[PrimExpr]]]:
+    """Collect Triton kernels as strings and launch args, without incorporating them into the IRModule.
+    This function does not return a pass."""
+
+    def _convert_to_tuple(array):
+        kernel_src, warps, stages, grid_shape = array
+        assert isinstance(kernel_src, str)
+        return kernel_src, int(warps), int(stages), list(grid_shape)
+
+    return {k: _convert_to_tuple(v) for k, v in _ffi_api.TritonCollectKernel(mod).items()}  # type: ignore
+
+
 def MakeUnpackedAPI():
     """Transform the PrimFuncs in the module to a C API compatible with internal calls.
 
@@ -882,7 +907,7 @@ def LiftThreadBinding():
     return _ffi_api.LiftThreadBinding()  # type: ignore
 
 
-def CompactBufferAllocation(is_strict: bool = True):
+def CompactBufferAllocation(is_strict: bool = True, remove_trivial_dims: bool = False):
     """Compact the buffer access region. by removing the buffer regions
     that are not accessed, i.e. narrowing the buffer shape and adjust
     the access region if necessary.
@@ -930,7 +955,7 @@ def CompactBufferAllocation(is_strict: bool = True):
         The result pass
 
     """
-    return _ffi_api.CompactBufferAllocation(is_strict)  # type: ignore
+    return _ffi_api.CompactBufferAllocation(is_strict, remove_trivial_dims)  # type: ignore
 
 
 def LowerMatchBuffer():

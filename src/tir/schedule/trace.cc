@@ -16,6 +16,8 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/tir/sexpr_printer.h>
+
 #include "./utils.h"
 
 namespace tvm {
@@ -67,10 +69,9 @@ Array<ObjectRef> TranslateInputRVs(const Array<ObjectRef>& inputs,
   };
 
   for (const ObjectRef& input : inputs) {
-    if (!input.defined() ||                   // constant: nullptr
-        input->IsInstance<StringObj>() ||     // constant: string
-        input->IsInstance<IntImmNode>() ||    // constant: integer
-        input->IsInstance<FloatImmNode>()) {  // constant: float
+    if (!input.defined() || input->IsInstance<StringObj>() || input->IsInstance<IntImmNode>() ||
+        input->IsInstance<FloatImmNode>() || input->IsInstance<runtime::Int::ContainerType>() ||
+        input->IsInstance<runtime::Float::ContainerType>()) {
       result.push_back(input);
     } else if (input->IsInstance<BlockRVNode>() ||  // RV: block
                input->IsInstance<LoopRVNode>() ||   // RV: loop
@@ -94,118 +95,6 @@ Array<ObjectRef> TranslateInputRVs(const Array<ObjectRef>& inputs,
   return result;
 }
 
-Array<ObjectRef> TranslateInputRVs(
-    const Array<ObjectRef>& inputs,
-    const std::unordered_map<ObjectRef, String, ObjectPtrHash, ObjectPtrEqual>& rv_names) {
-  Array<ObjectRef> results;
-  results.reserve(inputs.size());
-  for (const ObjectRef& input : inputs) {
-    if (!input.defined()) {
-      // Case 0. nullptr => None
-      results.push_back(String("None"));
-      continue;
-    }
-    auto it = rv_names.find(input);
-    if (it != rv_names.end()) {
-      // Case 1. BlockRV, LoopRV, VarRV
-      results.push_back(it->second);
-    } else if (const auto* str_obj = input.as<StringObj>()) {
-      // Case 2. string => "content"
-      results.push_back(String('"' + std::string(str_obj->data) + '"'));
-    } else if (input->IsInstance<IntImmNode>() || input->IsInstance<FloatImmNode>() ||
-               input->IsInstance<runtime::Int::ContainerType>() ||
-               input->IsInstance<runtime::Float::ContainerType>()) {
-      // Case 3. integer or floating-point number
-      results.push_back(input);
-    } else if (input->IsInstance<ArrayNode>()) {
-      // Case 4: array
-      results.push_back(TranslateInputRVs(Downcast<Array<ObjectRef>>(input), rv_names));
-    } else if (input->IsInstance<MapNode>()) {
-      // Case 5: dict
-      results.push_back(input);
-    } else if (input->IsInstance<IndexMapNode>()) {
-      // // Case 6: IndexMap
-      IndexMap index_map = Downcast<IndexMap>(input);
-      index_map = index_map.RenameVariables([&rv_names](const Var& var) -> Optional<String> {
-        if (auto it = rv_names.find(var); it != rv_names.end()) {
-          return it->second;
-        }
-        return NullOpt;
-      });
-      results.push_back(index_map);
-    } else if (input->IsInstance<BlockRVNode>() || inputs->IsInstance<LoopRVNode>() ||
-               inputs->IsInstance<VarNode>()) {
-      LOG(FATAL) << "IndexError: Random variable is not defined " << input;
-      throw;
-    } else {
-      LOG(FATAL) << "TypeError: Stringifying is not supported for type: " << input->GetTypeKey();
-      throw;
-    }
-  }
-  return results;
-}
-
-Array<ObjectRef> TranslateInputRVs(const Array<ObjectRef>& inputs,
-                                   const std::unordered_map<std::string, ObjectRef>& named_rvs) {
-  Array<ObjectRef> results;
-  results.reserve(inputs.size());
-  for (const ObjectRef& input : inputs) {
-    // Case 3. integer or floating-point number
-    if (input->IsInstance<IntImmNode>() || input->IsInstance<FloatImmNode>() ||
-        input->IsInstance<runtime::Int::ContainerType>() ||
-        input->IsInstance<runtime::Float::ContainerType>()) {
-      results.push_back(input);
-      continue;
-    }
-    // Case 4. array
-    if (input->IsInstance<ArrayNode>()) {
-      results.push_back(TranslateInputRVs(Downcast<Array<ObjectRef>>(input), named_rvs));
-      continue;
-    }
-    // Case 5. dict
-    if (input->IsInstance<MapNode>()) {
-      results.push_back(input);
-      continue;
-    }
-    const auto* str = input.as<StringObj>();
-    CHECK(str) << "TypeError: Expect String, but gets: " << input->GetTypeKey();
-    CHECK_GT(str->size, 0) << "ValueError: Empty string is not allowed in input names";
-    const char* name = str->data;
-    int64_t size = str->size;
-    if (name[0] == '{' && name[size - 1] == '}') {
-      ObjectRef obj = LoadJSON(name);
-      // Case 6. IndexMap
-      if (obj->IsInstance<IndexMapNode>()) {
-        IndexMap index_map = Downcast<IndexMap>(obj);
-        index_map = Substitute(index_map, [&named_rvs](const Var& var) -> Optional<PrimExpr> {
-          auto it = named_rvs.find(var->name_hint);
-          if (it != named_rvs.end()) {
-            return Downcast<Var>(it->second);
-          }
-          return NullOpt;
-        });
-        results.push_back(index_map);
-        continue;
-      } else {
-        LOG(FATAL) << "TypeError: Unexpected object: " << obj->GetTypeKey();
-        throw;
-      }
-    }
-    // Case 2. string
-    if (size >= 2 && name[0] == '"' && name[size - 1] == '"') {
-      results.push_back(String(std::string(name + 1, size - 2)));
-      continue;
-    }
-    // Case 0 & 1. None, BlockRV, LoopRV, VarRV
-    auto it = named_rvs.find(name);
-    CHECK(it != named_rvs.end()) << "ValueError: The random variable is not defined: " << name;
-    results.push_back(it->second);
-  }
-  return results;
-}
-
-/**************** TranslateAddOutputRVs  ****************/
-
 void TranslateAddOutputRVs(const Array<ObjectRef>& old_outputs, const Array<ObjectRef>& new_outputs,
                            std::unordered_map<const Object*, const Object*>* rv_map) {
   ICHECK_EQ(old_outputs.size(), new_outputs.size());
@@ -217,42 +106,205 @@ void TranslateAddOutputRVs(const Array<ObjectRef>& old_outputs, const Array<Obje
   }
 }
 
-Array<String> TranslateAddOutputRVs(
-    const Array<ObjectRef>& outputs,
-    std::unordered_map<ObjectRef, String, ObjectPtrHash, ObjectPtrEqual>* rv_names) {
+enum class EscapeMode {
+  kPython,
+  kJSON,
+};
+
+// More specific version of TranslateInputRVs that specifically maps from in-TVM repr
+// to outside repr.
+Array<ObjectRef> InputRVsToNames(const Array<ObjectRef>& inputs,
+                                 const std::unordered_map<const Object*, String>& rv_names,
+                                 EscapeMode mode) {
+  Array<ObjectRef> results;
+  results.reserve(inputs.size());
+  for (const ObjectRef& input : inputs) {
+    if (!input.defined()) {
+      // Case 0. nullptr => None
+      switch (mode) {
+        case EscapeMode::kPython:
+          results.push_back(String("None"));
+          break;
+        case EscapeMode::kJSON:
+          results.push_back(ObjectRef());
+          break;
+      }
+      continue;
+    }
+    if (input->IsInstance<BlockRVNode>() || input->IsInstance<LoopRVNode>() ||
+        input->IsInstance<VarNode>()) {
+      // Case 1. BlockRV, LoopRV, VarRV
+      auto it = rv_names.find(input.get());
+      ICHECK(it != rv_names.end()) << "IndexError: Random variable is not defined " << input;
+      results.push_back(it->second);
+    } else if (const auto* str_obj = input.as<StringObj>()) {
+      // Case 2. string => "content"
+      results.push_back(String('"' + std::string(str_obj->data) + '"'));
+    } else if (input->IsInstance<IntImmNode>() || input->IsInstance<FloatImmNode>() ||
+               input->IsInstance<runtime::Int::ContainerType>() ||
+               input->IsInstance<runtime::Float::ContainerType>()) {
+      // Case 3. integer or floating-point number
+      results.push_back(input);
+    } else if (input->IsInstance<ArrayNode>()) {
+      // Case 4: array
+      results.push_back(InputRVsToNames(Downcast<Array<ObjectRef>>(input), rv_names, mode));
+    } else if (input->IsInstance<MapNode>()) {
+      // Case 5: dict
+      results.push_back(input);
+    } else if (auto index_map_ = input.as<IndexMap>()) {
+      // Case 6: IndexMap
+      IndexMap index_map =
+          index_map_.value().RenameVariables([&rv_names](const Var& var) -> Optional<String> {
+            if (auto it = rv_names.find(var.get()); it != rv_names.end()) {
+              return it->second;
+            }
+            return NullOpt;
+          });
+      switch (mode) {
+        // Send the IndexMap directly. Ultimately `UnpackedAsPython()` gets it in arguments,
+        // and will handle it properly.
+        case EscapeMode::kPython:
+          results.push_back(index_map);
+          break;
+        // Convert the IndexMap to JSON. This is a bit tricky as TVM's JSONify mechanism
+        // returns a string of a JSON object, while ideally we want a dict.
+        // Instead we'll just play along with this string, pretending it's a dict.
+        // (Hey, it's shallow embedding!)
+        case EscapeMode::kJSON:
+          results.push_back(String(SaveJSON(index_map)));
+          break;
+      }
+    } else if (auto expr_ = input.as<PrimExpr>()) {
+      // We can have expressions of VarRVs in the trace, which is handled similarly to the IndexMap
+      // case above.
+      PrimExpr expr = Substitute(expr_.value(), [&rv_names](const Var& var) -> Optional<PrimExpr> {
+        if (auto it = rv_names.find(var.get()); it != rv_names.end()) {
+          return Var(it->second);
+        }
+        return NullOpt;
+      });
+      switch (mode) {
+        case EscapeMode::kPython:
+          results.push_back(expr);
+          break;
+        // Convert the expr to an S-expr string. This is much (much!) shorter than what SaveJSON
+        // will do, and the result is somewhat readable (compared to the garbled mess of SaveJSON).
+        case EscapeMode::kJSON:
+          results.push_back(String(SExprPrinter::Print(expr)));
+          break;
+      }
+    } else {
+      LOG(FATAL) << "TypeError: Stringifying is not supported for type: " << input->GetTypeKey();
+      throw;
+    }
+  }
+  return results;
+}
+
+// A more specific version of TranslateInputRVs that specifically maps from JSON repr
+// to in-TVM repr. Python repr -> TVM is not handled here (handled by the interpreter instead, in
+// effect).
+Array<ObjectRef> InputNamesToRVs(const Array<ObjectRef>& inputs,
+                                 const std::unordered_map<std::string, ObjectRef>& named_rvs) {
+  Array<ObjectRef> results;
+  results.reserve(inputs.size());
+  for (const ObjectRef& input : inputs) {
+    if (!input.defined()) {
+      // Case 0. None
+      results.push_back(ObjectRef());
+    } else if (input->IsInstance<IntImmNode>() || input->IsInstance<FloatImmNode>() ||
+               input->IsInstance<runtime::Int::ContainerType>() ||
+               input->IsInstance<runtime::Float::ContainerType>()) {
+      // Case 3. integer or floating-point number
+      results.push_back(input);
+    } else if (input->IsInstance<ArrayNode>()) {
+      // Case 4. array
+      results.push_back(InputNamesToRVs(Downcast<Array<ObjectRef>>(input), named_rvs));
+    } else if (input->IsInstance<MapNode>()) {
+      // Case 5. dict
+      results.push_back(input);
+    } else {
+      // Everything down here is a JSON string, but a JSON string can mean multiple TVM things.
+      // Cases (note that they don't overlap):
+      //   2. string -- a quoted string "..."
+      //   6. IndexMap -- an object { ... }
+      //   1. PrimExpr, BlockRV, LoopRV, VarRV -- anything that can be parsed into a PrimExpr.
+      //      A legal repr of PrimExpr is never surrounded by "" or {}.
+      const auto* str = input.as<StringObj>();
+      CHECK(str) << "TypeError: Expect String, but gets: " << input->GetTypeKey();
+      std::string name = GetRef<String>(str);
+      int64_t size = name.size();
+      CHECK_GT(size, 0) << "ValueError: Empty string is not allowed in input names";
+      if (name.front() == '{' && name.back() == '}') {
+        // Case 6. IndexMap
+        IndexMap index_map = Downcast<IndexMap>(LoadJSON(name));
+        index_map = Substitute(index_map, [&named_rvs](const Var& var) -> Optional<PrimExpr> {
+          auto it = named_rvs.find(var->name_hint);
+          if (it != named_rvs.end()) {
+            return Downcast<Var>(it->second);
+          }
+          return NullOpt;
+        });
+        results.push_back(index_map);
+      } else if (name.front() == '"' && name.back() == '"') {
+        // Case 2. string
+        ICHECK(size >= 2);
+        results.push_back(String(name.substr(1, size - 2)));
+      } else {
+        auto it = named_rvs.find(name);
+        if (it != named_rvs.end()) {
+          // Case 1. BlockRV, LoopRV, VarRV
+          results.push_back(it->second);
+        } else {
+          // Case 7. PrimExpr
+          results.push_back(SExprParser::Parse(name, [&named_rvs](const std::string& name) {
+            auto it = named_rvs.find(name);
+            ICHECK(it != named_rvs.end()) << "IndexError: Random variable doesn't exist: " << name;
+            return Downcast<Var>(it->second);
+          }));
+        }
+      }
+    }
+  }
+  return results;
+}
+
+Array<String> OutputRVsToNames(const Array<ObjectRef>& outputs,
+                               std::unordered_map<const Object*, String>& rv_names) {
   Array<String> results;
   results.reserve(outputs.size());
   for (const ObjectRef& output : outputs) {
-    int i = rv_names->size();
-    ICHECK(!rv_names->count(output))
-        << "ValueError: The random variable has been produced once: " << rv_names->at(output);
-    String result{ObjectPtr<StringObj>{nullptr}};
+    int i = rv_names.size();
+    auto it = rv_names.find(output.get());
+    ICHECK(it == rv_names.end()) << "ValueError: The random variable has been produced once: "
+                                 << it->second;
+    String result{nullptr};
     if (output->IsInstance<BlockRVNode>()) {
       result = "b" + std::to_string(i);
     } else if (output->IsInstance<LoopRVNode>()) {
       result = "l" + std::to_string(i);
-    } else if (output->IsInstance<VarNode>()) {
-      result = "v" + std::to_string(i);
+    } else if (auto var_node = output.as<VarNode>()) {
+      result = var_node->name_hint;
     } else {
       LOG(FATAL) << "TypeError: Cannot recognize the type of the random variable: "
                  << output->GetTypeKey();
       throw;
     }
     results.push_back(result);
-    rv_names->emplace(output, std::move(result));
+    rv_names.emplace(output.get(), std::move(result));
   }
   return results;
 }
 
-void TranslateAddOutputRVs(const Array<String>& old_outputs, const Array<ObjectRef>& new_outputs,
-                           std::unordered_map<std::string, ObjectRef>* named_rvs) {
+void UpdateOutputNamesToRVs(const Array<String>& old_outputs, const Array<ObjectRef>& new_outputs,
+                            std::unordered_map<std::string, ObjectRef>& named_rvs) {
   ICHECK_EQ(old_outputs.size(), new_outputs.size());
   int n = old_outputs.size();
   const ObjectRef* p_old = old_outputs.GetArrayNode()->begin();
   const ObjectRef* p_new = new_outputs.GetArrayNode()->begin();
   for (int i = 0; i < n; ++i) {
     const auto* name = static_cast<const StringObj*>(p_old[i].get());
-    named_rvs->emplace(std::string(name->data, name->size), p_new[i]);
+    named_rvs.emplace(std::string(name->data, name->size), p_new[i]);
   }
 }
 
@@ -307,7 +359,7 @@ void TraceNode::ApplyToSchedule(
 }
 
 ObjectRef TraceNode::AsJSON(bool remove_postproc) const {
-  std::unordered_map<ObjectRef, String, ObjectPtrHash, ObjectPtrEqual> rv_names;
+  std::unordered_map<const Object*, String> rv_names;
   Array<ObjectRef> json_insts;
   Array<ObjectRef> json_decisions;
   json_insts.reserve(this->insts.size());
@@ -321,10 +373,10 @@ ObjectRef TraceNode::AsJSON(bool remove_postproc) const {
     }
     json_insts.push_back(Array<ObjectRef>{
         /* 0: inst name */ kind->name,
-        /* 1: inputs    */ TranslateInputRVs(inst->inputs, rv_names),
+        /* 1: inputs    */ InputRVsToNames(inst->inputs, rv_names, EscapeMode::kJSON),
         /* 2: attrs     */ kind->f_attrs_as_json != nullptr ? kind->f_attrs_as_json(inst->attrs)
                                                             : ObjectRef(inst->attrs),
-        /* 3: outputs   */ TranslateAddOutputRVs(inst->outputs, &rv_names),
+        /* 3: outputs   */ OutputRVsToNames(inst->outputs, rv_names),
     });
     if (Optional<ObjectRef> decision = this->GetDecision(inst)) {
       json_decisions.push_back(Array<ObjectRef>{
@@ -341,7 +393,7 @@ ObjectRef TraceNode::AsJSON(bool remove_postproc) const {
 }
 
 Array<String> TraceNode::AsPython(bool remove_postproc) const {
-  std::unordered_map<ObjectRef, String, ObjectPtrHash, ObjectPtrEqual> rv_names;
+  std::unordered_map<const Object*, String> rv_names;
   Array<String> py_trace;
   py_trace.reserve(this->insts.size());
   for (const Instruction& inst : this->insts) {
@@ -357,11 +409,11 @@ Array<String> TraceNode::AsPython(bool remove_postproc) const {
         attrs.push_back(obj);
       }
     }
-    py_trace.push_back(
-        inst->kind->f_as_python(/*inputs=*/TranslateInputRVs(inst->inputs, rv_names),
-                                /*attrs=*/attrs,
-                                /*decision=*/this->GetDecision(inst),
-                                /*outputs=*/TranslateAddOutputRVs(inst->outputs, &rv_names)));
+    py_trace.push_back(inst->kind->f_as_python(
+        /*inputs=*/InputRVsToNames(inst->inputs, rv_names, EscapeMode::kPython),
+        /*attrs=*/attrs,
+        /*decision=*/this->GetDecision(inst),
+        /*outputs=*/OutputRVsToNames(inst->outputs, rv_names)));
   }
   return py_trace;
 }
@@ -435,7 +487,7 @@ void Trace::ApplyJSONToSchedule(ObjectRef json, Schedule sch) {
       throw;
     }
     // Parse inputs
-    inputs = TranslateInputRVs(inputs, named_rvs);
+    inputs = InputNamesToRVs(inputs, named_rvs);
     // Parse attrs
     if (kind->f_attrs_from_json != nullptr) {
       attrs = kind->f_attrs_from_json(attrs);
@@ -443,7 +495,7 @@ void Trace::ApplyJSONToSchedule(ObjectRef json, Schedule sch) {
     // Apply to the schedule
     Array<ObjectRef> new_outputs = kind->f_apply_to_schedule(sch, inputs, attrs, decisions[i]);
     // Parse outputs
-    TranslateAddOutputRVs(outputs, new_outputs, &named_rvs);
+    UpdateOutputNamesToRVs(outputs, new_outputs, named_rvs);
     ++i;
   }
 }

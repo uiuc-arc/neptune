@@ -16,6 +16,13 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/arith/pattern.h>
+#include <tvm/support/iterator.h>
+#include <tvm/tir/sexpr_printer.h>
+
+#include <algorithm>
+#include <mutex>
+
 #include "../utils.h"
 
 namespace tvm {
@@ -609,33 +616,6 @@ std::unordered_map<const VarNode*, For> GetLoopVar2LoopMap(const Array<For>& loo
 }
 
 /*!
- * \brief Create the intermediate rfactor buffers, which the rfactor block writes to and the
- * write-back block reads from
- * \param buf_stores The BufferStores of the original block, where the rfactor buffers will be
- * created from
- * \param factor_axis The `factor_axis` parameter of rfactor
- * \param rf_loop The rfactor loop
- * \return The new created intermediate rfactor buffer
- */
-Array<Buffer> CreateRFactorBuffers(const Array<BufferStore>& buf_stores, int factor_axis,
-                                   const ForNode* rf_loop) {
-  Array<Buffer> rf_buffers;
-  rf_buffers.reserve(buf_stores.size());
-  for (const BufferStore& buf_store : buf_stores) {
-    Buffer buffer = buf_store->buffer;
-    Array<PrimExpr> rf_shape = buffer->shape;
-    rf_shape.insert(rf_shape.begin() + factor_axis, rf_loop->extent);
-
-    ObjectPtr<BufferNode> n = make_object<BufferNode>(*buffer.get());
-    n->shape = rf_shape;
-    n->name = buffer->name + ".rf";
-    n->data = buffer->data.copy_with_suffix(".rf");
-    rf_buffers.push_back(Buffer(n));
-  }
-  return rf_buffers;
-}
-
-/*!
  * \brief The base class of the rfactor/write-back block creator, which creates the blocks in four
  * steps:
  * 1) Create the new block iters and the their iter bindings
@@ -662,7 +642,7 @@ class BaseBlockCreator {
     update_rhs_.reserve(n_buffers_);
   }
 
-  void CreateBlock() {
+  BlockRealize CreateBlock() {
     CreateAdditionalIter();
     for (int i = 0; i < n_block_iters_; ++i) {
       CreateNormalIters(i);
@@ -691,7 +671,7 @@ class BaseBlockCreator {
       new_block_name = new_block_name + "_rf";
       predicate = old_block_realize_->predicate;
     }
-    new_block_ = Block(
+    Block new_block(
         /*iter_vars=*/iter_vars_,
         /*reads=*/read_regions_,
         /*writes=*/write_regions_,
@@ -701,8 +681,10 @@ class BaseBlockCreator {
         /*alloc_buffers=*/{},
         /*match_buffers=*/{},
         /*annotations=*/old_block_realize_->block->annotations);
-    new_block_realize_ = BlockRealize(iter_values_, predicate, new_block_);
+    return BlockRealize(iter_values_, predicate, new_block);
   }
+
+  Map<Var, PrimExpr> GetVarMap() const { return var_map_; }
 
  private:
   virtual void CreateAdditionalIter() = 0;
@@ -760,10 +742,6 @@ class BaseBlockCreator {
   }
 
  public:
-  /*! \brief The new created block */
-  Block new_block_;
-  /*! \brief The new created block-realize */
-  BlockRealize new_block_realize_;
   /*! \brief The indices used to access the intermediate rfactor buffer */
   Array<PrimExpr> rf_buf_access_indices_;
 
@@ -844,7 +822,7 @@ class RFactorBlockCreator : public BaseBlockCreator {
         factor_axis_(factor_axis),
         combiner_rhs_(std::move(combiner_rhs)) {}
 
- private:
+ protected:
   void CreateAdditionalIter() final {
     // Create a new data parallel block iter for the rfactor loop.
     additional_iter_ =
@@ -893,7 +871,7 @@ class RFactorBlockCreator : public BaseBlockCreator {
     var_map_.Set(old_iter->var, Substitute(old_binding, loop_var2block_binding_));
   }
 
-  void PreProcess() final {
+  void PreProcess() override {
     // The accessed indices for all reduction buffers are the same.
     rf_buf_access_indices_ = old_reduction_updates_[0]->indices;
     rf_buf_access_indices_.insert(rf_buf_access_indices_.begin() + factor_axis_,
@@ -906,7 +884,7 @@ class RFactorBlockCreator : public BaseBlockCreator {
     }
   }
 
-  void CreateReadWriteRegions() final {
+  void CreateReadWriteRegions() override {
     Map<Buffer, Buffer> buffer_map;
     for (int i = 0; i < n_buffers_; ++i) {
       buffer_map.Set(old_reduction_updates_[i]->buffer, rf_buffers_[i]);
@@ -933,7 +911,7 @@ class RFactorBlockCreator : public BaseBlockCreator {
   /*! \brief The generated additional block iter in rfactor block for the rfactor loop */
   IterVar additional_iter_;
 
- private:
+ protected:
   /*!
    * \brief A mapping which maps a loop var to its corresponding For loop for all the reduction
    * block's outer loops
@@ -950,6 +928,21 @@ class RFactorBlockCreator : public BaseBlockCreator {
    */
   std::unordered_map<const VarNode*, Var> loop_var2block_binding_;
 };
+
+Array<BufferRegion> CreateRegion(const Array<PrimExpr>& buf_loads) {
+  Array<BufferRegion> buf_regions;
+  for (const PrimExpr& expr : buf_loads) {
+    const auto* buf_load = expr.as<BufferLoadNode>();
+    ICHECK(buf_load != nullptr);
+    Array<Range> region;
+    region.reserve(buf_load->indices.size());
+    for (const PrimExpr& index : buf_load->indices) {
+      region.push_back(Range::FromMinExtent(index, make_const(index.dtype(), 1)));
+    }
+    buf_regions.push_back(BufferRegion(buf_load->buffer, std::move(region)));
+  }
+  return buf_regions;
+}
 
 /*!
  * \brief The derived class of the write-back block creator, which implements all virtual methods in
@@ -972,8 +965,8 @@ class WriteBackBlockCreator : public BaseBlockCreator {
     rf_buf_access_indices_ = std::move(rf_buf_access_indices);
   }
 
- private:
-  void CreateAdditionalIter() final {
+ protected:
+  void CreateAdditionalIter() override {
     // Create a new reduction block iter for the rfactor loop.
     IterVar wb_new_block_iter =
         IterVarFromLoop(rf_loop_, "v" + rf_loop_->loop_var->name_hint, kCommReduce);
@@ -992,7 +985,7 @@ class WriteBackBlockCreator : public BaseBlockCreator {
     }
   }
 
-  void PreProcess() final {
+  void PreProcess() override {
     for (int i = 0; i < n_buffers_; ++i) {
       PrimExpr rhs = BufferLoad(rf_buffers_[i], rf_buf_access_indices_);
       update_buffers_.push_back(old_reduction_updates_[i]->buffer);
@@ -1002,26 +995,12 @@ class WriteBackBlockCreator : public BaseBlockCreator {
     }
   }
 
-  void CreateReadWriteRegions() final {
-    CreateRegion(update_rhs_, true);
-    CreateRegion(update_lhs_, false);
+  void CreateReadWriteRegions() override {
+    read_regions_ = CreateRegion(update_rhs_);
+    write_regions_ = CreateRegion(update_lhs_);
   }
 
-  void CreateRegion(const Array<PrimExpr>& buf_loads, bool is_read) {
-    Array<BufferRegion>& buf_regions = is_read ? read_regions_ : write_regions_;
-    for (const PrimExpr& expr : buf_loads) {
-      const auto* buf_load = expr.as<BufferLoadNode>();
-      ICHECK(buf_load != nullptr);
-      Array<Range> region;
-      region.reserve(buf_load->indices.size());
-      for (const PrimExpr& index : buf_load->indices) {
-        region.push_back(Range::FromMinExtent(index, make_const(index.dtype(), 1)));
-      }
-      buf_regions.push_back(BufferRegion(buf_load->buffer, std::move(region)));
-    }
-  }
-
- private:
+ protected:
   /*! \brief The new created additional block iter of the rfactor block */
   IterVar rf_additional_iter_;
   /*! \brief The LHS values of the reduction in the old block */
@@ -1114,12 +1093,12 @@ class BlockReplacer : public StmtMutator {
   }
 
  private:
-  explicit BlockReplacer(Stmt rf_body, For outermost_loop, BlockRealize wb_block_realize,
+  explicit BlockReplacer(Stmt rf_body, For join_point, BlockRealize wb_block_realize,
                          BlockRealize old_block_realize, For rf_loop,
                          std::unordered_set<const VarNode*> reduce_loop_vars,
                          std::unordered_map<const VarNode*, For> loop_vars2loop)
       : rf_body_(std::move(rf_body)),
-        outermost_loop_(std::move(outermost_loop)),
+        join_point_(std::move(join_point)),
         wb_block_realize_(std::move(wb_block_realize)),
         old_block_realize_(std::move(old_block_realize)),
         rf_loop_(std::move(rf_loop)),
@@ -1145,16 +1124,17 @@ class BlockReplacer : public StmtMutator {
       body = Stmt(p_loop);
     }
 
-    // Step 4. If this loop is the outermost loop of the reduction block, return the combination of
+    // Step 4. If we're at the specified join point, return the combination of
     // `rf_body_` and the mutation result `body`. Otherwise return the mutation result.
-    return loop == outermost_loop_.get() ? SeqStmt({rf_body_, body}) : body;
+    return loop == join_point_.get() ? SeqStmt({rf_body_, body}) : body;
   }
 
   Stmt VisitStmt_(const BlockRealizeNode* block_realize) final {
-    // Due to the visitor's behavior on ForNode, this block-realize must be the reduction block's
-    // block-realize. And we directly return the new `wb_block_realize`.
-    ICHECK_EQ(block_realize, old_block_realize_.get());
-    return wb_block_realize_;
+    // Replace old_block_realize_ with wb_block_realize_.
+    if (block_realize == old_block_realize_.get()) {
+      return wb_block_realize_;
+    }
+    return StmtMutator::VisitStmt_(block_realize);
   }
 
   Stmt VisitStmt_(const SeqStmtNode* seq) final {
@@ -1169,7 +1149,7 @@ class BlockReplacer : public StmtMutator {
 
  private:
   Stmt rf_body_;
-  For outermost_loop_;
+  For join_point_;
   BlockRealize wb_block_realize_;
   BlockRealize old_block_realize_;
   For rf_loop_;
@@ -1177,7 +1157,8 @@ class BlockReplacer : public StmtMutator {
   std::unordered_map<const VarNode*, For> loop_vars2loop_;
 };
 
-StmtSRef RFactor(ScheduleState self, const StmtSRef& rf_loop_sref, int factor_axis) {
+StmtSRef RFactor(ScheduleState self, const StmtSRef& rf_loop_sref, int factor_axis,
+                 bool merge_loops) {
   // *****************************************************
   // *    Condition Checks and Information Collection    *
   // *****************************************************
@@ -1191,9 +1172,9 @@ StmtSRef RFactor(ScheduleState self, const StmtSRef& rf_loop_sref, int factor_ax
   if (self->enable_check) {
     CheckReductionBlock(self, block_sref, scope_root);
   }
-  const ForNode* rf_loop = TVM_SREF_TO_FOR(rf_loop_sref);
+  auto rf_loop = GetRef<For>(TVM_SREF_TO_FOR(rf_loop_sref));
   if (rf_loop->kind != ForKind::kSerial) {
-    throw NotSerialLoopKindError(self->mod, GetRef<For>(rf_loop));
+    throw NotSerialLoopKindError(self->mod, rf_loop);
   }
 
   // Step 2. Collect loop vars that are touched by data parallel block iters and reduction block
@@ -1214,8 +1195,16 @@ StmtSRef RFactor(ScheduleState self, const StmtSRef& rf_loop_sref, int factor_ax
   // - the outermost loop that is touched by some reduction block iters can only have one child
   // block.
   if (self->enable_check) {
-    LoopPropertyError::CheckLoopProperty(self, loops, rf_loop, block, data_par_loop_vars,
+    LoopPropertyError::CheckLoopProperty(self, loops, rf_loop.get(), block, data_par_loop_vars,
                                          reduce_loop_vars);
+  }
+
+  // Step 4.1. To merge loop nests (if `merge_loops == true`), only keep the loops that are inside
+  // the reduction loop (excluding the reduction loop itself).
+  if (merge_loops) {
+    auto it = std::find(loops.begin(), loops.end(), rf_loop);
+    ICHECK(it != loops.end()) << "The rfactor loop is not found in the loops";
+    loops.erase(loops.begin(), it + 1);
   }
 
   // Step 5. Get the `init` identity and the `update` combiner of the reduction. Extract the
@@ -1244,23 +1233,22 @@ StmtSRef RFactor(ScheduleState self, const StmtSRef& rf_loop_sref, int factor_ax
 
   // Step 1. Create the intermediate buffer (a.k.a. rfactor buffer), which has an additional
   // dimension that specified by `factor_axis` and `rf_loop`.
-  Array<Buffer> rf_buffers = CreateRFactorBuffers(updates, factor_axis, rf_loop);
+  Array<Buffer> rf_buffers = CreateExpandedBuffers(updates, factor_axis, rf_loop->extent);
 
   // Step 2. Create the rfactor block.
-  RFactorBlockCreator rf_block_creator(block_realize, GetRef<For>(rf_loop), updates, reducer,
-                                       rf_buffers, loop_vars2loop, factor_axis,
-                                       std::move(combiner_rhs));
-  rf_block_creator.CreateBlock();
+  RFactorBlockCreator rf_block_creator(block_realize, rf_loop, updates, reducer, rf_buffers,
+                                       loop_vars2loop, factor_axis, std::move(combiner_rhs));
+  auto rf_br = rf_block_creator.CreateBlock();
 
   // Step 3. Create the write-back block.
-  WriteBackBlockCreator wb_block_creator(block_realize, GetRef<For>(rf_loop), updates, reducer,
-                                         rf_buffers, std::move(rf_block_creator.additional_iter_),
+  WriteBackBlockCreator wb_block_creator(block_realize, rf_loop, updates, reducer, rf_buffers,
+                                         std::move(rf_block_creator.additional_iter_),
                                          std::move(combiner_lhs),
                                          std::move(rf_block_creator.rf_buf_access_indices_));
-  wb_block_creator.CreateBlock();
+  auto wb_br = wb_block_creator.CreateBlock();
 
   // Step 4. Wrap the rfactor block with loops.
-  Stmt rf_body = CreateLoopOutsideRfactorBlock(rf_block_creator.new_block_realize_, loops);
+  Stmt rf_body = CreateLoopOutsideRfactorBlock(rf_br, loops);
 
   // *****************************************************
   // *           Schedule Replacement & Update           *
@@ -1268,16 +1256,15 @@ StmtSRef RFactor(ScheduleState self, const StmtSRef& rf_loop_sref, int factor_ax
 
   // Step 1. Substitute the old scope root block with the new scope root block.
   Block old_scope_root_block = GetRef<Block>(scope_root->StmtAs<BlockNode>());
-  Block new_scope_root_block = BlockReplacer::Replace(
-      old_scope_root_block, rf_body, loops[0], wb_block_creator.new_block_realize_, block_realize,
-      GetRef<For>(rf_loop), reduce_loop_vars, loop_vars2loop, rf_buffers);
-  self->Replace(
-      scope_root, new_scope_root_block,
-      {{old_scope_root_block, new_scope_root_block}, {block, wb_block_creator.new_block_}});
+  Block new_scope_root_block =
+      BlockReplacer::Replace(old_scope_root_block, rf_body, loops[0], wb_br, block_realize, rf_loop,
+                             reduce_loop_vars, loop_vars2loop, rf_buffers);
+  self->Replace(scope_root, new_scope_root_block,
+                {{old_scope_root_block, new_scope_root_block}, {block, wb_br->block}});
 
   // Step 2. Update scope information.
-  std::vector<StmtSRef> new_block_srefs{self->stmt2ref.at(rf_block_creator.new_block_.get()),
-                                        self->stmt2ref.at(wb_block_creator.new_block_.get())};
+  std::vector<StmtSRef> new_block_srefs{self->stmt2ref.at(rf_br->block.get()),
+                                        self->stmt2ref.at(wb_br->block.get())};
   for (const StmtSRef& new_block_sref : new_block_srefs) {
     BlockInfo& info = self->block_info[new_block_sref];
     info.affine_binding = true;
@@ -1286,6 +1273,772 @@ StmtSRef RFactor(ScheduleState self, const StmtSRef& rf_loop_sref, int factor_ax
   }
   return new_block_srefs[0];
 }
+
+/* Rolling Update, Split-K Update */
+
+namespace {
+
+template <typename K, typename V>
+using ObjectMap = std::unordered_map<K, V, ObjectPtrHash, ObjectPtrEqual>;
+template <typename K>
+using ObjectSet = std::unordered_set<K, ObjectPtrHash, ObjectPtrEqual>;
+
+struct ReduceBlockFrontier {
+  virtual bool HasIncompleteBuffer(const Buffer& buffer) const = 0;
+};
+
+struct RollingUpdateBlockFrontier : ReduceBlockFrontier {
+  static std::tuple<RollingUpdateBlockFrontier, std::vector<StmtSRef>> Build(
+      const ScheduleState& self, const StmtSRef& block_sref, const StmtSRef& loop_sref,
+      const StmtSRef& scope_root_sref, const size_t scan_dim);
+
+  void ApplyAllReduceToScan(ScheduleState& self, const StmtSRef& loop_sref);
+
+  std::optional<size_t> GetScanDim(const Buffer& buffer) const {
+    auto it = bufs_scan_dim_.find(buffer);
+    return it == bufs_scan_dim_.end() ? std::optional<size_t>() : it->second;
+  }
+
+  bool HasIncompleteBuffer(const Buffer& buffer) const override {
+    return GetScanDim(buffer).has_value();
+  }
+
+ private:
+  RollingUpdateBlockFrontier(ObjectSet<StmtSRef> block_srefs, size_t arg_scan_dim)
+      : arg_scan_dim_(arg_scan_dim), block_srefs_(std::move(block_srefs)) {}
+
+  size_t arg_scan_dim_;
+  ObjectSet<StmtSRef> block_srefs_;
+  // This one is populated later by `ApplyAllReduceToScan`.
+  ObjectMap<Buffer, size_t> bufs_scan_dim_;
+};
+
+struct SplitKBlockFrontier : ReduceBlockFrontier {
+  static std::tuple<SplitKBlockFrontier, std::vector<StmtSRef>> Build(
+      const ScheduleState& self, const StmtSRef& block_sref, const StmtSRef& loop_sref,
+      const StmtSRef& scope_root_sref);
+
+  bool InitiateBlockBufferSubst(ScheduleState& self, const StmtSRef& block_sref,
+                                const StmtSRef& loop_sref) const;
+  void FinishBlockBufferSubst(ScheduleState& self, const StmtSRef& block_sref,
+                              const StmtSRef& loop_sref) const;
+
+  auto GetWBBufferFromRFBuffer(const Buffer& buffer) const {
+    auto it = rf_to_wb_.find(buffer);
+    return it == rf_to_wb_.end() ? std::optional<std::pair<Buffer, size_t>>() : it->second;
+  }
+
+  bool HasIncompleteBuffer(const Buffer& buffer) const override {
+    return GetWBBufferFromRFBuffer(buffer).has_value();
+  }
+
+ private:
+  SplitKBlockFrontier(const ObjectSet<StmtSRef>& post_l_frontier,
+                      const ObjectSet<StmtSRef>& under_l_frontier);
+
+  ObjectMap<Buffer, std::pair<Buffer, size_t>> wb_to_rf_, rf_to_wb_;
+};
+
+struct ReduceRepairer {
+  static ReduceRepairer DeriveFromBlockExpr(const CommReducer& reducer, PrimExpr combiner_rhs,
+                                            const ReduceBlockFrontier& frontier);
+
+  using BufLoadRewriter = std::function<std::pair<BufferLoad, BufferLoad>(const BufferLoad&)>;
+
+  Block RewriteBlockExpr(Block block, const Map<Var, PrimExpr>& iv_transform,
+                         BufLoadRewriter buf_load_rewriter, PrimExpr load_condition,
+                         arith::Analyzer& analyzer, bool apply_to_lhs) const;
+
+ private:
+  using BufAndVxT = std::vector<std::tuple<BufferLoad, Var, Var>>;
+
+  ReduceRepairer(PrimExpr h_expr, Var vr, BufAndVxT buf_and_vx)
+      : h_expr_(std::move(h_expr)), vr_(std::move(vr)), buf_and_vx_(std::move(buf_and_vx)) {}
+
+  ReduceRepairer() = default;
+
+ public:
+  PrimExpr h_expr_{};
+  Var vr_{};
+  BufAndVxT buf_and_vx_{};
+};
+
+/*!
+ \brief Mock-inline all the blocks in `blocks`. Requires `blocks` to be topologically sorted where
+ `blocks[-1]` is the last block. The inlining is done in a new ScheduleState, without modifying
+ `_cur_state`.
+ \return The new version of the last block after inlining.
+ */
+Block MockInlineBlocks(const ScheduleState& _cur_state, const std::vector<StmtSRef>& blocks);
+
+struct RFactorInternalProducts {
+  Buffer rf_buffer;
+  StmtSRef rf_block_sref;
+  WriteBackBlockCreator wb_block_creator;
+};
+
+/*!
+ \brief Run \ref RFactor, and return more intermediate products in RFactorInternalProducts.
+*/
+RFactorInternalProducts RFactorInternal(ScheduleState self, const StmtSRef& scope_root_sref,
+                                        const StmtSRef& block_sref, const StmtSRef& loop_sref,
+                                        int factor_axis, bool add_annotations);
+
+}  // namespace
+
+StmtSRef RollingUpdate(ScheduleState self, const StmtSRef& block_sref, const StmtSRef& loop_sref,
+                       int factor_axis) {
+  // See the docstring of `RollingUpdate` for a high-level overview. It describes what `b0`, `Br`,
+  // `Bt` are, and these symbols are important here. Here we describe the details as we go:
+
+  // Step 1. Find the reduce producers of `b0` as `Br`, and produce the topological order `Bt`.
+  StmtSRef scope_root_sref = GetScopeRoot(self, block_sref, /*require_stage_pipeline=*/false);
+  auto [frontier, topo_order] =
+      RollingUpdateBlockFrontier::Build(self, block_sref, loop_sref, scope_root_sref, factor_axis);
+  // Step 2. Reverse-compute-at all the blocks in `Bt` into the loop `l`.
+  for (auto& block_sref : topo_order) {
+    // ...only if `block_sref` is not already under `loop_sref`.
+    if (!GetSRefLowestCommonAncestor({block_sref, loop_sref}).same_as(loop_sref)) {
+      tir::UnsafeReverseComputeAt(self, block_sref, loop_sref, /*preserve_unit_loops=*/true);
+    }
+  }
+  // Step 3. Apply `ReduceToScan` to convert each reduction block in `Br` into a scan block.
+  frontier.ApplyAllReduceToScan(self, loop_sref);
+
+  // Step 4. Algebraic rewrite starts. Mock-inline all of `Bt` into `b0`, which produces a `b0_new`
+  // with all the computation concentrated into it. Match `b0_new` against TVM-known reduction
+  // patterns, then produce a `ReduceRepairer` function.
+  arith::Analyzer analyzer;
+  auto new_b0 = MockInlineBlocks(self, topo_order);
+  auto red_match = tir::MatchSelfReduction(self, new_b0, std::nullopt);
+  auto repairer = ReduceRepairer::DeriveFromBlockExpr(red_match.reducer,
+                                                      analyzer.Simplify(red_match.rhs), frontier);
+
+  // Step 5. Run RFactor to factorize `b0` over `l`.
+  auto rfactor_result = RFactorInternal(self, scope_root_sref, block_sref, loop_sref, factor_axis,
+                                        /*add_annotations=*/false);
+
+  // Step 6. Apply the `ReduceRepairer` function to the write-back block.
+  auto wb_block = GetRef<Block>(TVM_SREF_TO_BLOCK(block_sref));
+  // NOTE: we're assuming the first iter-var is the RFactor iter-var. See
+  // `WriteBackBlockCreator`. If the logic changes there, we need to change this too.
+  Var rf_iv_var = wb_block->iter_vars[0]->var;
+  // Create a substitution map from the x-vars, x'-vars, and r-var to their expressions.
+  auto iv_var_map = rfactor_result.wb_block_creator.GetVarMap();
+  Block new_wb_block = repairer.RewriteBlockExpr(
+      wb_block, iv_var_map,
+      [&, &frontier = frontier](const BufferLoad& buf_load) {
+        size_t rf_dim = frontier.GetScanDim(buf_load->buffer).value();
+        auto prev_buf_load = buf_load;
+        prev_buf_load.CopyOnWrite()->indices.Set(rf_dim, rf_iv_var - 1);
+        auto curr_buf_load = buf_load;
+        curr_buf_load.CopyOnWrite()->indices.Set(rf_dim, rf_iv_var);
+        return std::make_pair(prev_buf_load, curr_buf_load);
+      },
+      // Since we create a BufferLoad that uses `rf_iv_var - 1`, we need to put a Select condition
+      // around the load.
+      /*load_condition=*/rf_iv_var > 0, analyzer, /*apply_to_lhs=*/true);
+  self->Replace(block_sref, new_wb_block, {{wb_block, new_wb_block}});
+  return rfactor_result.rf_block_sref;
+}
+
+StmtSRef SplitKUpdate(ScheduleState self, const StmtSRef& block_sref, const StmtSRef& loop_sref,
+                      int factor_axis) {
+  // See the docstring of `SplitKUpdate` for a high-level overview. It describes what `b0`, `Br`,
+  // `Bt` are, and these symbols are important here. Also see the docstring of `RollingUpdate` for a
+  // comparison. Here we describe the details as we go:
+
+  // Step 1. Find the reduce producers of `b0` as `Br`, and produce the topological order `Bt`.
+  StmtSRef scope_root_sref = GetScopeRoot(self, block_sref, /*require_stage_pipeline=*/false);
+  auto [frontier, topo_order] =
+      SplitKBlockFrontier::Build(self, block_sref, loop_sref, scope_root_sref);
+  // Step 2. Substitute the buffer reads of each block in `Bt`, and fuse them under `l`.
+  std::vector<bool> block_modified(topo_order.size(), false);
+  for (size_t i = 0; i < topo_order.size(); ++i) {
+    block_modified[i] = frontier.InitiateBlockBufferSubst(self, topo_order[i], loop_sref);
+  }
+  // NOTE: the use-def relation of the blocks has changed, so we need to update it.
+  // You may think that `self->Replace` should do it, but it doesn't seem to, maybe because
+  // modifications to the computation expression in blocks are rare in TVM.
+  // To make sure `UpdateScopeBlockInfo` works, it's important that we start from the BlockRealize
+  // of the scope root, not the scope root block itself.
+  self->UpdateScopeBlockInfo(GetBlockRealize(self, scope_root_sref));
+  for (size_t i = 0; i < topo_order.size(); ++i) {
+    if (!GetSRefLowestCommonAncestor({topo_order[i], loop_sref}).same_as(loop_sref)) {
+      tir::UnsafeReverseComputeAt(self, topo_order[i], loop_sref, /*preserve_unit_loops=*/true);
+    }
+    if (block_modified[i]) {
+      frontier.FinishBlockBufferSubst(self, topo_order[i], loop_sref);
+    }
+  }
+
+  // Step 3. Algebraic rewrite starts. Mock-inline all of `Bt` into `b0`, which produces a `b0_new`
+  // with all the computation concentrated into it. Match `b0_new` against TVM-known reduction
+  // patterns, then produce a `ReduceRepairer` function.
+  arith::Analyzer analyzer;
+  auto new_block = MockInlineBlocks(self, topo_order);
+  auto new_red_match = tir::MatchSelfReduction(self, new_block, std::nullopt);
+  auto repairer = ReduceRepairer::DeriveFromBlockExpr(
+      new_red_match.reducer, analyzer.Simplify(new_red_match.rhs), frontier);
+
+  // Step 4. Run RFactor to factorize `b0` over `l`.
+  auto rfactor_result = RFactorInternal(self, scope_root_sref, block_sref, loop_sref, factor_axis,
+                                        /*add_annotations=*/true);
+
+  // Step 5. Apply the `ReduceRepairer` function to the write-back block.
+  auto wb_block = GetRef<Block>(TVM_SREF_TO_BLOCK(block_sref));
+  Var rf_iv_var = wb_block->iter_vars[0]->var;
+  auto iv_var_map = rfactor_result.wb_block_creator.GetVarMap();
+  Block new_wb_block = repairer.RewriteBlockExpr(
+      wb_block, iv_var_map,
+      [&, &frontier = frontier](const BufferLoad& buf_load) {
+        auto [wb_buffer, rf_dim] = frontier.GetWBBufferFromRFBuffer(buf_load->buffer).value();
+        auto prev_buf_load = buf_load;
+        prev_buf_load.CopyOnWrite()->indices.Set(rf_dim, rf_iv_var);
+        auto curr_load_indices = buf_load->indices;
+        curr_load_indices.erase(curr_load_indices.begin() + rf_dim);
+        BufferLoad curr_buf_load(wb_buffer, curr_load_indices);
+        return std::make_pair(prev_buf_load, curr_buf_load);
+      },
+      /*load_condition=*/PrimExpr(), analyzer, /*apply_to_lhs=*/false);
+  self->Replace(block_sref, new_wb_block, {{wb_block, new_wb_block}});
+
+  // Step 6. Pull the write-back block (now under `l`) out to root position.
+  tir::ReverseComputeRoot(self, block_sref);
+  return rfactor_result.rf_block_sref;
+}
+
+namespace {
+
+BufferRegion GetUniqueWrite(const BlockNode* block) {
+  ICHECK(block->writes.size() == 1) << "Only one write is supported";
+  return block->writes[0];
+}
+
+bool IsIncompleteUnderLoop(const ScheduleState& self, const StmtSRef& block_sref,
+                           const StmtSRef& loop_sref) {
+  // 1. If `loop` is not among the loops of the block, return false.
+  auto loops = GetLoops(block_sref);
+  auto loop_it = std::find(loops.begin(), loops.end(), loop_sref);
+  if (loop_it == loops.end()) {
+    return false;
+  }
+  // 2. Check if any reduction iter-var uses `loop`. If so, return true.
+  // If any reduction iter-var uses loops outside of `loop`, that's an error because we don't know
+  // how to handle that.
+  auto br = GetBlockRealize(self, block_sref);
+  auto forbidden_loop_vars = support::map(loops.begin(), loop_it, [](const StmtSRef& loop_sref) {
+                               return TVM_SREF_TO_FOR(loop_sref)->loop_var.get();
+                             }).to_container<std::unordered_set>();
+  auto loop = TVM_SREF_TO_FOR(loop_sref);
+  for (size_t i = 0; i < br->iter_values.size(); ++i) {
+    auto iv = br->block->iter_vars[i];
+    auto iv_expr = br->iter_values[i];
+    if ((iv->iter_type != IterVarType::kCommReduce && iv->iter_type != IterVarType::kOrdered)) {
+      continue;
+    }
+    bool uses_forbidden_vars =
+        UsesVar(iv_expr, [&](const VarNode* var) { return forbidden_loop_vars.count(var); });
+    ICHECK(!uses_forbidden_vars)
+        << "Block reduction iter-var " << iv << " = " << iv_expr
+        << " uses loops outside of the target loop. This is not supported.";
+    bool uses_loop_var =
+        UsesVar(iv_expr, [&](const VarNode* var) { return loop->loop_var.get() == var; });
+    if (uses_loop_var) {
+      return true;
+    }
+  }
+  return false;
+}
+
+struct AfterLoopFinder {
+  AfterLoopFinder(const StmtSRef& scope_root_sref, const For& loop) : loop_(loop) {
+    bool is_after_l = false;
+    PostOrderVisit(GetRef<Stmt>(scope_root_sref->stmt), [&](const ObjectRef& node) {
+      if (node.same_as(loop)) {
+        is_after_l = true;
+      } else if (auto block = node.as<Block>(); block && is_after_l) {
+        blocks_after_loop_.insert(block.value().get());
+      }
+    });
+  }
+
+  bool IsReductionAfterLoop(const StmtSRef& block_sref) const {
+    auto block = TVM_SREF_TO_BLOCK(block_sref);
+    auto& ivs = block->iter_vars;
+    bool has_reduce_iv = std::any_of(ivs.begin(), ivs.end(), [](const IterVar& iv) {
+      return iv->iter_type == IterVarType::kCommReduce;
+    });
+    return has_reduce_iv && blocks_after_loop_.count(block);
+  }
+
+  const For& loop_;
+  std::unordered_set<const BlockNode*> blocks_after_loop_;
+};
+
+std::optional<std::tuple<bool, Buffer, size_t>> PreviousRollingUpdateAnnot(const BlockNode* block) {
+  auto rf_buffer_annot_ = GetAnn<Array<ObjectRef>>(block, attr::tir_rfactor_data);
+  if (!rf_buffer_annot_.defined()) {
+    return std::nullopt;
+  }
+  auto rf_buffer_annot = rf_buffer_annot_.value();
+  ICHECK(rf_buffer_annot.size() == 3);
+  auto is_writeback = Downcast<Bool>(rf_buffer_annot[0]);
+  auto rf_buffer = Downcast<Buffer>(rf_buffer_annot[1]);
+  auto factor_axis = Downcast<Integer>(rf_buffer_annot[2]);
+  return std::make_tuple(is_writeback->value, rf_buffer, factor_axis->value);
+}
+
+bool IsAnnotatedRFactorBlock(const BlockNode* block) {
+  auto annot = PreviousRollingUpdateAnnot(block);
+  return annot.has_value() && !std::get<0>(annot.value());
+}
+
+auto FrontierBuildHelper(const ScheduleState& self, const StmtSRef& b0_sref,
+                         const StmtSRef& loop_sref, const StmtSRef& scope_root_sref) {
+  // Get all blocks after `loop`. We'll use it in a bit.
+  auto loop = GetRef<For>(TVM_SREF_TO_FOR(loop_sref));
+  AfterLoopFinder block_finder(scope_root_sref, loop);
+
+  // NOTE:
+  // 1. The "frontiers" contain producers of `b0` that are "incomplete", which means they are
+  // either reductions under `loop`, which we put in `under_l_frontier`, or just outright after
+  // `loop`, which we put in `post_l_frontier`. (Of course `b0` itself is also after `loop`, but we
+  // don't include it in `post_l_frontier`.)
+  // 2. `topo_order` only contains blocks that are on a path that leads into any of the frontier
+  // blocks. It always ends in `b0`.
+  // 3. Because `Visitor` needs to look at `found_incomplete`, insertion into `topo_order`
+  // happens after the recursive call, which creates a reverse topological order.
+  ObjectSet<StmtSRef> post_l_frontier, under_l_frontier, seen;
+  std::vector<StmtSRef> topo_order;
+  std::function<bool(const StmtSRef&)> Visitor = [&](const StmtSRef& block_sref) -> bool {
+    seen.insert(block_sref);
+    auto block = TVM_SREF_TO_BLOCK(block_sref);
+    if (IsIncompleteUnderLoop(self, block_sref, loop_sref) || IsAnnotatedRFactorBlock(block)) {
+      under_l_frontier.insert(block_sref);
+      return true;
+    } else if (!block_sref.same_as(b0_sref) && block_finder.IsReductionAfterLoop(block_sref)) {
+      post_l_frontier.emplace(block_sref);
+      return true;
+    }
+    bool found_incomplete = false;
+    for (auto& producer_sref : GetProducers(self, block_sref)) {
+      if (!seen.count(producer_sref)) {
+        found_incomplete |= Visitor(producer_sref);
+      }
+    }
+    if (found_incomplete) {
+      topo_order.push_back(block_sref);
+    }
+    return found_incomplete;
+  };
+
+  Visitor(b0_sref);
+  // If there's anything in `topo_order` at all, it should end in `block_sref`. However, if it's
+  // empty, manually add it to satisfy the contract.
+  if (topo_order.empty()) {
+    topo_order.push_back(b0_sref);
+  } else {
+    ICHECK(topo_order.back().same_as(b0_sref));
+  }
+  return std::make_tuple(post_l_frontier, under_l_frontier, topo_order);
+}
+
+std::tuple<RollingUpdateBlockFrontier, std::vector<StmtSRef>> RollingUpdateBlockFrontier::Build(
+    const ScheduleState& self, const StmtSRef& b0_sref, const StmtSRef& loop_sref,
+    const StmtSRef& scope_root_sref, size_t scan_dim) {
+  auto [post_l_frontier, under_l_frontier, topo_order] =
+      FrontierBuildHelper(self, b0_sref, loop_sref, scope_root_sref);
+  ICHECK(post_l_frontier.empty())
+      << "Found the following post-loop producers in scan mode (only allowed in post-reduce mode): "
+      << [&xs = post_l_frontier]() {
+           auto GetName = [&](const StmtSRef& block_sref) {
+             return TVM_SREF_TO_BLOCK(block_sref)->name_hint;
+           };
+           return support::map(xs, GetName).to_vector();
+         }();
+  return {RollingUpdateBlockFrontier(under_l_frontier, scan_dim), topo_order};
+}
+
+void RollingUpdateBlockFrontier::ApplyAllReduceToScan(ScheduleState& self,
+                                                      const StmtSRef& loop_sref) {
+  for (auto& block_sref : block_srefs_) {
+    auto scan_dim_annot = GetAnn<Integer>(block_sref, attr::tir_scan_buf_dim);
+    if (scan_dim_annot.defined()) {
+      auto write = GetUniqueWrite(TVM_SREF_TO_BLOCK(block_sref));
+      bufs_scan_dim_.emplace(write->buffer, scan_dim_annot.value()->value);
+    } else {
+      tir::ReduceToScan(self, block_sref, loop_sref, /*write_buffer_index=*/0, arg_scan_dim_);
+      auto write = GetUniqueWrite(TVM_SREF_TO_BLOCK(block_sref));
+      bufs_scan_dim_.emplace(write->buffer, arg_scan_dim_);
+    }
+  }
+}
+
+std::tuple<SplitKBlockFrontier, std::vector<StmtSRef>> SplitKBlockFrontier::Build(
+    const ScheduleState& self, const StmtSRef& b0_sref, const StmtSRef& loop_sref,
+    const StmtSRef& scope_root_sref) {
+  auto [post_l_frontier, under_l_frontier, topo_order] =
+      FrontierBuildHelper(self, b0_sref, loop_sref, scope_root_sref);
+  ObjectMap<Buffer, std::pair<Buffer, size_t>> frontier_buf_wb_to_rf;
+  auto AddBlockBuffer = [&](const StmtSRef& block_sref) {
+    auto block = TVM_SREF_TO_BLOCK(block_sref);
+    auto [is_writeback, rf_buffer, rf_buffer_dim] = PreviousRollingUpdateAnnot(block).value();
+    if (is_writeback) {
+      auto write = GetUniqueWrite(block);
+      frontier_buf_wb_to_rf.emplace(write->buffer, std::make_pair(rf_buffer, rf_buffer_dim));
+    }
+  };
+  for (auto& block_sref : under_l_frontier) {
+    AddBlockBuffer(block_sref);
+  }
+  for (auto& block_sref : post_l_frontier) {
+    AddBlockBuffer(block_sref);
+  }
+  return {SplitKBlockFrontier(post_l_frontier, under_l_frontier), topo_order};
+}
+
+SplitKBlockFrontier::SplitKBlockFrontier(const ObjectSet<StmtSRef>& post_l_frontier,
+                                         const ObjectSet<StmtSRef>& under_l_frontier) {
+  auto PreviousRollingUpdateAnnot_ = [](const BlockNode* block) {
+    auto annot = PreviousRollingUpdateAnnot(block);
+    ICHECK(annot.has_value()) << "Block " << block->name_hint << " is expected to have annotation "
+                              << attr::tir_rfactor_data << " in split-k-update";
+    return annot.value();
+  };
+  for (auto& block_sref : post_l_frontier) {
+    auto block = TVM_SREF_TO_BLOCK(block_sref);
+    auto [is_writeback, rf_buffer, rf_buffer_dim] = PreviousRollingUpdateAnnot_(block);
+    ICHECK(is_writeback) << "Block " << block->name_hint << " is expected to be a writeback block "
+                         << "in split-k-update";
+    auto write = GetUniqueWrite(block);
+    wb_to_rf_.emplace(write->buffer, std::make_pair(rf_buffer, rf_buffer_dim));
+    rf_to_wb_.emplace(rf_buffer, std::make_pair(write->buffer, rf_buffer_dim));
+  }
+  for (auto& block_sref : under_l_frontier) {
+    auto block = TVM_SREF_TO_BLOCK(block_sref);
+    auto [is_writeback, wb_buffer, rf_buffer_dim] = PreviousRollingUpdateAnnot_(block);
+    ICHECK(!is_writeback) << "Block " << block->name_hint << " is expected to be an rfactor block "
+                          << "in split-k-update";
+    auto write = GetUniqueWrite(block);
+    rf_to_wb_.emplace(write->buffer, std::make_pair(wb_buffer, rf_buffer_dim));
+  }
+}
+
+bool SplitKBlockFrontier::InitiateBlockBufferSubst(ScheduleState& self, const StmtSRef& block_sref,
+                                                   const StmtSRef& loop_sref) const {
+  auto block = GetRef<Block>(TVM_SREF_TO_BLOCK(block_sref));
+  auto loop_var = TVM_SREF_TO_FOR(loop_sref)->loop_var;
+  auto new_block =
+      Downcast<Block>(ReplaceBufferLoads(block, [&](const BufferLoadNode* op) -> PrimExpr {
+        auto it = wb_to_rf_.find(op->buffer);
+        if (it == wb_to_rf_.end()) {
+          return GetRef<PrimExpr>(op);
+        } else {
+          auto [rf_buffer, rf_buffer_dim] = it->second;
+          auto indices = op->indices;
+          indices.insert(indices.begin() + rf_buffer_dim, loop_var);
+          return BufferLoad(rf_buffer, indices);
+        }
+      }));
+  if (new_block.same_as(block)) {
+    return false;
+  }
+  self->Replace(block_sref, new_block, {{block, new_block}});
+  return true;
+}
+
+void SplitKBlockFrontier::FinishBlockBufferSubst(ScheduleState& self, const StmtSRef& block_sref,
+                                                 const StmtSRef& loop_sref) const {
+  // Create a new iter-var `v_j` for the loop var `j`, add `v_j` to the block's iter-vars, and
+  // substitute existing uses of `j` with `v_j`.
+  auto loop = GetRef<For>(TVM_SREF_TO_FOR(loop_sref));
+  auto loop_var = loop->loop_var;
+  MutateAndReplaceBlockRealize(self, block_sref, [&](BlockRealize br) {
+    auto [new_br, new_iv] = SplitVarFromIterVars(br, loop_var, Range::FromExtent(loop->extent));
+    auto block = Downcast<Block>(Substitute(new_br->block, {{loop_var, new_iv->var}}));
+    return BlockRealize(new_br->iter_values, new_br->predicate, block, new_br->span);
+  });
+}
+
+Block MockInlineBlocks(const ScheduleState& _cur_state, const std::vector<StmtSRef>& blocks) {
+  // NOTE: because TVM does not support undoing of inlining, we will create a new ScheduleState
+  // where the inlining happens. We don't clone the IRModule itself.
+  // We also need to transport `blocks` to the new state.
+  ScheduleState new_state(_cur_state->mod, _cur_state->debug_mask, _cur_state->enable_check);
+  auto new_blocks = support::map(blocks, [&](const StmtSRef& block_sref) {
+                      return new_state->stmt2ref.at(block_sref->stmt);
+                    }).to_vector();
+  ICHECK(!new_blocks.empty());
+  // `new_blocks` is topologically sorted, and when we inline the blocks, all the other blocks
+  // should get inlined into the last block (meaning that we don't want to inline the last block).
+  auto last_block = new_blocks.back();
+  new_blocks.pop_back();
+  auto scope_root_sref = GetScopeRoot(new_state, last_block, /*require_stage_pipeline=*/false);
+  for (auto& block_sref : new_blocks) {
+    auto [new_scope_root, block_reuse] =
+        tir::ApplyInlineAndGenerateScopeRoot(new_state, block_sref, scope_root_sref);
+    new_state->Replace(scope_root_sref, new_scope_root, block_reuse);
+  }
+  return GetRef<Block>(TVM_SREF_TO_BLOCK(last_block));
+}
+
+struct Memoizer {
+  std::unordered_map<std::string, std::string> cached_results;
+  std::mutex mutex;
+
+  static Memoizer global_memoizer;
+
+  static std::optional<std::string> Get(const std::string& key) {
+    std::lock_guard<std::mutex> lock(global_memoizer.mutex);
+    auto it = global_memoizer.cached_results.find(key);
+    if (it != global_memoizer.cached_results.end()) {
+      return it->second;
+    }
+    return std::nullopt;
+  }
+
+  static void Set(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lock(global_memoizer.mutex);
+    global_memoizer.cached_results[key] = value;
+  }
+};
+
+Memoizer Memoizer::global_memoizer;
+
+/*!
+ \brief Solves for a global updater `H` that can update the final result that has been reduced by
+ the comm-reducer `f`, in the style of FlashAttention.
+ \param reducer an associative, commutative reducer `f`.
+ \param g_expr a map function, written as an expression of `x`-variables (see x2x).
+ \param x2x a map from x-variables (old x) to x'-variables (new x).
+ \param r a variable that represents the reduction result.
+ \return the global updater `H`, written as an expression of `r` and `x2x` variables.
+*/
+PrimExpr HExprSolver(const CommReducer& reducer, const PrimExpr& g_expr, const Map<Var, Var>& x2x,
+                     const Var& r) {
+  // Cache the result. This function (and rolling-update, in general) may be called thousands of
+  // times due to the autotuner replaying traces.
+  // We save the string representation of PrimExprs, because PrimExpr itself compares by pointer
+  // (and even if we use StructuralEqual, in the end Vars compare by pointer, not name).
+  auto cache_key = SExprPrinter::Print(g_expr);
+  if (auto value_str = Memoizer::Get(cache_key)) {
+    // If the cache hit, parse the result and return it.
+    std::unordered_map<std::string, Var> varmap({{r->name_hint, r}});
+    for (auto& [x, x_] : x2x) {
+      varmap[x->name_hint] = x;
+      varmap[x_->name_hint] = x_;
+    }
+    return SExprParser::Parse(value_str.value(), varmap);
+  }
+
+  auto FindAndCheckFunc = [](const std::string& name) {
+    auto* func = runtime::Registry::Get(name);
+    ICHECK(func) << name << " is not registered.";
+    return (*func);
+  };
+  const auto& seperator = FindAndCheckFunc("arith.sympy.separate_vars");
+  const auto& inverter = FindAndCheckFunc("arith.sympy.inverse");
+  const auto& simplifier = FindAndCheckFunc("arith.sympy.simplify");
+
+  // 1. Attempt to separate `u`-variables and `x`-variables in `g`, such that `g(u..., x...) =
+  // gcomb(gu(u...), gx(x...))`. If there is only one `u` and only one `x`, this step is trivial.
+  Array<Var> xvars;
+  for (auto& [x, _] : x2x) {
+    xvars.push_back(x);
+  }
+  // gcomb will be given as an expression of `a` and `b`.
+  Var a("a", g_expr->dtype), b("b", g_expr->dtype);
+  Optional<Array<PrimExpr>> separated = seperator(g_expr, xvars, a, b);
+  ICHECK(separated.defined()) << "Cannot separate the variables in the combiner RHS.";
+  ICHECK(separated.value().size() == 3);
+  auto gx = separated.value()[0], gcomb = separated.value()[2];
+  // 2. Attempt to invert `gcomb(a, b) = r` wrt `a` to get `a = gcomb^(-1)(r, b)`.
+  // gcomb_inv will be given as an expression of `r` and `b`.
+  PrimExpr gcomb_inv = inverter(gcomb, a, r);
+  // 3. Compute h(r, x, x') = g_comb(g_comb^(-1)(r, gx(x)), gx(x')).
+  PrimExpr gcomb_inv_ = Substitute(gcomb_inv, {{b, gx}});  // gcomb^(-1)(r, gx(x))
+  PrimExpr gx_prime = Substitute(gx, x2x);                 // gx(x')
+  PrimExpr h = simplifier(Substitute(gcomb, {{a, gcomb_inv_}, {b, gx_prime}}));
+  // 4. Solve for a global updater `H` that can update the final result that has been reduced by
+  // the comm-reducer `f`. We will prove that
+  // h(f(y_1, y_2), x, x') == f(h(y_1, x, x'), h(y_2, x, x')).
+  // If so, `H` is just `h` and we're done. This covers a lot of common cases.
+  const auto& prover = FindAndCheckFunc("arith.sympy.prove");
+  auto dtype = reducer->result[0]->dtype;
+  Var y1("y1", dtype), y2("y2", dtype);
+  auto h_subst = [&](PrimExpr r_) { return Substitute(h, {{r, r_}}); };
+  PrimExpr y1fy2 = reducer->operator()({y1}, {y2})[0],
+           hy1fhy2 = reducer->operator()({h_subst(y1)}, {h_subst(y2)})[0],
+           condition = prover(h_subst(y1fy2), hy1fhy2, "eq");
+  ICHECK(is_const_int(condition, 1)) << "Cannot prove the correctness of the global "
+                                        "updater `H`.";
+  Memoizer::Set(cache_key, SExprPrinter::Print(h));
+  return h;
+}
+
+ReduceRepairer ReduceRepairer::DeriveFromBlockExpr(const CommReducer& reducer,
+                                                   PrimExpr combiner_rhs,
+                                                   const ReduceBlockFrontier& frontier) {
+  // 1. Examine BufferLoad usages in reduction RHS. Find `BufferLoad`s that load from incomplete
+  // buffers (produced by block in `incomp_buf_info`), and replace them with temp variables `x{i}`.
+  // Replace other loads with `u{i}`.
+  std::unordered_map<const BufferLoadNode*, std::pair<Var, bool>> buf_load_subst;
+  bool has_incomplete = false;
+  PrimExpr g_expr = ReplaceBufferLoads(combiner_rhs, [&](const BufferLoadNode* buf_load) {
+    auto it = buf_load_subst.find(buf_load);
+    if (it != buf_load_subst.end()) {
+      return it->second.first;
+    }
+    bool is_incomplete = frontier.HasIncompleteBuffer(buf_load->buffer);
+    has_incomplete |= is_incomplete;
+    std::string name = is_incomplete ? "x" : "u";
+    Var x(name + std::to_string(buf_load_subst.size()), buf_load->dtype);
+    buf_load_subst.emplace(buf_load, std::make_pair(x, is_incomplete));
+    return x;
+  });
+  // If there is no incomplete buffer usage, the updater function is trivial.
+  if (!has_incomplete) {
+    return ReduceRepairer();
+  }
+  // 2. Solve the core problem: find a function `H` that can update the result of the reduction.
+  // We count 2N+1 variables that the result h-expr may contain: N x-vars, N x'-vars, and 1 r-var.
+  Map<Var, Var> x2xp;
+  BufAndVxT buf_and_vx;
+  for (auto& [buf_load, x_pair] : buf_load_subst) {
+    auto [x, is_incomplete] = x_pair;
+    if (is_incomplete) {
+      Var x_ = x.copy_with_name(x->name_hint + "_");
+      x2xp.Set(x, x_);
+      buf_and_vx.emplace_back(GetRef<BufferLoad>(buf_load), x, x_);
+    }
+  }
+  Var r("r", g_expr->dtype);
+  PrimExpr h_expr = HExprSolver(reducer, g_expr, x2xp, r);
+  return ReduceRepairer(h_expr, r, buf_and_vx);
+}
+
+Block ReduceRepairer::RewriteBlockExpr(Block block, const Map<Var, PrimExpr>& iv_transform,
+                                       BufLoadRewriter buf_load_rewriter, PrimExpr load_condition,
+                                       arith::Analyzer& analyzer, bool apply_to_lhs) const {
+  if (!h_expr_.defined()) {
+    return block;
+  }
+  auto red_match = MatchSelfReduction(NullOpt, block, std::nullopt);
+  auto new_store = red_match.update;
+  // Populate a substitution map from x-vars, x'-vars, and r-var to their expressions.
+  Map<Var, PrimExpr> vx_to_expr;
+  for (auto& [buf_load, x, x_] : buf_and_vx_) {
+    auto new_buf_load = Downcast<BufferLoad>(Substitute(buf_load, iv_transform));
+    auto [prev_buf_load, curr_buf_load] = buf_load_rewriter(new_buf_load);
+    vx_to_expr.Set(x, prev_buf_load);
+    vx_to_expr.Set(x_, curr_buf_load);
+  }
+  PrimExpr our_expr = red_match.rhs, their_expr = red_match.lhs;
+  if (apply_to_lhs) {
+    std::swap(our_expr, their_expr);
+  }
+  vx_to_expr.Set(vr_, our_expr);
+  // Produce the new expr (could be LHS or RHS) from `vx_to_expr`.
+  auto new_expr = Substitute(h_expr_, vx_to_expr);
+  if (load_condition.defined()) {
+    new_expr = Select(load_condition, new_expr, our_expr);
+  }
+  new_expr = analyzer.Simplify(new_expr);
+  // Apply the reducer to the other side of the reduction to produce the full expression on the
+  // right of the assignment.
+  PrimExpr lhs_expr = their_expr, rhs_expr = new_expr;
+  if (apply_to_lhs) {
+    std::swap(lhs_expr, rhs_expr);
+  }
+  PrimExpr full_expr = red_match.reducer->operator()({lhs_expr}, {rhs_expr})[0];
+  // Produce the full BufferStore, and apply to the Block.
+  new_store.CopyOnWrite()->value = full_expr;
+  {
+    auto block_ptr = block.CopyOnWrite();
+    block_ptr->body = new_store;
+    std::tie(block_ptr->reads, block_ptr->writes) = GetBlockReadWriteRegion(block);
+  }
+  return block;
+}
+
+BlockRealize WithAnnotation(BlockRealize block_realize, const String& attr_name,
+                            const ObjectRef& value) {
+  auto br_ptr = block_realize.CopyOnWrite();
+  br_ptr->block = WithAnnotation(br_ptr->block.get(), attr_name, value);
+  return block_realize;
+}
+
+RFactorInternalProducts RFactorInternal(ScheduleState self, const StmtSRef& scope_root_sref,
+                                        const StmtSRef& block_sref, const StmtSRef& loop_sref,
+                                        int factor_axis, bool add_annotations) {
+  // Get some basic information about the block and its loops.
+  auto loops = GetLoops(block_sref);
+  std::vector<For> inner_loops = [&] {
+    auto it = std::find(loops.begin(), loops.end(), loop_sref);
+    ICHECK(it != loops.end());
+    return support::map(
+               it + 1, loops.end(),  // Don't include loop_sref itself
+               [](const StmtSRef& loop_sref) { return GetRef<For>(TVM_SREF_TO_FOR(loop_sref)); })
+        .to_vector();
+  }();
+  auto loop = GetRef<For>(TVM_SREF_TO_FOR(loop_sref));
+  auto block_realize = GetBlockRealize(self, block_sref);
+  auto block = block_realize->block;
+  std::unordered_set<const VarNode*> reduce_loop_vars;
+  GetVarsTouchedByBlockIters(block_realize, nullptr, &reduce_loop_vars);
+
+  // Match this block against TVM-known reduction patterns `out[i...] = f(out[i...], in[i..., j])`,
+  // and extract `reducer := f`, `red_lhs := out[i...]`, `red_rhs := in[i..., j]`.
+  auto red_match = tir::MatchSelfReduction(self, block, std::nullopt);
+  auto buf_store = red_match.update;
+  // Check and normalize `factor_axis`. If it's negative, warp it back to positive.
+  factor_axis =
+      FactorAxisOutOfRangeError::CheckAndUpdate(self->mod, buf_store->buffer, factor_axis);
+  // Create the intermediate buffer (a.k.a. rfactor buffer), which has an additional dimension that
+  // specified by `factor_axis` and `rf_loop`.
+  Array<Buffer> rf_buffers = CreateExpandedBuffers({buf_store}, factor_axis, loop->extent);
+  ICHECK(rf_buffers.size() == 1);
+  // Create the rfactor block, then wrap it with loops.
+  auto loopvars2loop = GetLoopVar2LoopMap(LoopSRefs2Loops(loops));
+  RFactorBlockCreator rf_block_creator(block_realize, loop, {buf_store}, red_match.reducer,
+                                       rf_buffers, loopvars2loop, factor_axis, {red_match.rhs});
+  auto rf_br = rf_block_creator.CreateBlock();
+  // Add the annotation to the rfactor block: (False, writeback_buffer, factor_axis)
+  if (add_annotations) {
+    rf_br = WithAnnotation(
+        rf_br, attr::tir_rfactor_data,
+        Array<ObjectRef>{Bool(false), red_match.update->buffer, Integer(factor_axis)});
+  }
+  Stmt rf_body = CreateLoopOutsideRfactorBlock(rf_br, inner_loops);
+
+  // Create the write-back block.
+  WriteBackBlockCreator wb_block_creator(block_realize, loop, {buf_store}, red_match.reducer,
+                                         rf_buffers, std::move(rf_block_creator.additional_iter_),
+                                         {red_match.lhs},
+                                         std::move(rf_block_creator.rf_buf_access_indices_));
+  auto wb_br = wb_block_creator.CreateBlock();
+  // Add the annotation to the writeback block: (True, rfactor_buffer, factor_axis)
+  if (add_annotations) {
+    wb_br = WithAnnotation(wb_br, attr::tir_rfactor_data,
+                           Array<ObjectRef>{Bool(true), rf_buffers[0], Integer(factor_axis)});
+  }
+
+  // Use `BlockReplacer` to edit the entire scope block, including inserting the new rf and wb
+  // blocks.
+  Block old_scope_root_block = GetRef<Block>(TVM_SREF_TO_BLOCK(scope_root_sref));
+  auto new_scope_root_block =
+      BlockReplacer::Replace(old_scope_root_block, rf_body, inner_loops[0], wb_br, block_realize,
+                             loop, reduce_loop_vars, loopvars2loop, rf_buffers);
+  self->Replace(scope_root_sref, new_scope_root_block,
+                {{old_scope_root_block, new_scope_root_block}, {block, wb_br->block}});
+  auto new_rf_sref = self->stmt2ref.at(rf_br->block.get());
+  return RFactorInternalProducts{.rf_buffer = rf_buffers[0],
+                                 .rf_block_sref = new_rf_sref,
+                                 .wb_block_creator = wb_block_creator};
+}
+
+}  // namespace
 
 /******** InstructionKind Registration ********/
 
@@ -1320,17 +2073,20 @@ struct RFactorTraits : public UnpackedInstTraits<RFactorTraits> {
 
  private:
   static constexpr size_t kNumInputs = 1;
-  static constexpr size_t kNumAttrs = 1;
+  static constexpr size_t kNumAttrs = 2;
   static constexpr size_t kNumDecisions = 0;
 
-  static BlockRV UnpackedApplyToSchedule(Schedule sch, LoopRV loop_rv, Integer factor_axis) {
-    return sch->RFactor(loop_rv, factor_axis->value);
+  static BlockRV UnpackedApplyToSchedule(Schedule sch, LoopRV loop_rv, Integer factor_axis,
+                                         Bool merge_loops) {
+    return sch->RFactor(loop_rv, factor_axis->value, merge_loops->value);
   }
 
-  static String UnpackedAsPython(Array<String> outputs, String loop_rv, Integer factor_axis) {
+  static String UnpackedAsPython(Array<String> outputs, String loop_rv, Integer factor_axis,
+                                 Bool merge_loops) {
     PythonAPICall py("rfactor");
     py.Input("loop", loop_rv);
     py.Input("factor_axis", factor_axis->value);
+    py.Input("merge_loops", merge_loops->value);
     py.SingleOutput(outputs);
     return py.Str();
   }
@@ -1339,8 +2095,41 @@ struct RFactorTraits : public UnpackedInstTraits<RFactorTraits> {
   friend struct ::tvm::tir::UnpackedInstTraits;
 };
 
+#define CREATE_ROLLING_UPDATE_TRAITS(NAME_UPPER, NAME_LOWER)                               \
+  struct NAME_UPPER##Traits : public UnpackedInstTraits<NAME_UPPER##Traits> {              \
+    static constexpr const char* kName = #NAME_UPPER;                                      \
+    static constexpr bool kIsPure = false;                                                 \
+                                                                                           \
+   private:                                                                                \
+    static constexpr size_t kNumInputs = 2;                                                \
+    static constexpr size_t kNumAttrs = 1;                                                 \
+    static constexpr size_t kNumDecisions = 0;                                             \
+                                                                                           \
+    static BlockRV UnpackedApplyToSchedule(Schedule sch, BlockRV block_rv, LoopRV loop_rv, \
+                                           Integer factor_axis) {                          \
+      return sch->NAME_UPPER(block_rv, loop_rv, factor_axis->value);                       \
+    }                                                                                      \
+                                                                                           \
+    static String UnpackedAsPython(Array<String> outputs, String block_rv, String loop_rv, \
+                                   Integer factor_axis) {                                  \
+      PythonAPICall py(#NAME_LOWER);                                                       \
+      py.Input("block", block_rv);                                                         \
+      py.Input("loop", loop_rv);                                                           \
+      py.Input("factor_axis", factor_axis);                                                \
+      return py.Str();                                                                     \
+    }                                                                                      \
+                                                                                           \
+    template <typename>                                                                    \
+    friend struct ::tvm::tir::UnpackedInstTraits;                                          \
+  };
+
+CREATE_ROLLING_UPDATE_TRAITS(RollingUpdate, rolling_update)
+CREATE_ROLLING_UPDATE_TRAITS(SplitKUpdate, split_k_update)
+
 TVM_REGISTER_INST_KIND_TRAITS(RFactorTraits);
 TVM_REGISTER_INST_KIND_TRAITS(DecomposeReductionTraits);
+TVM_REGISTER_INST_KIND_TRAITS(RollingUpdateTraits);
+TVM_REGISTER_INST_KIND_TRAITS(SplitKUpdateTraits);
 
 /******** FFI ********/
 

@@ -38,8 +38,8 @@ from tvm.tir.schedule import BlockRV, Schedule
 from tvm.tir.schedule.analysis import has_block
 from tvm.tir.tensor_intrin.hexagon import (
     VRMPY_u8i8i32_INTRIN,
-    VRMPY_u8u8i32_INTRIN,
     VRMPY_u8i8i32_VTCM_INTRIN,
+    VRMPY_u8u8i32_INTRIN,
 )
 
 from ..infrastructure import get_hexagon_target
@@ -373,7 +373,6 @@ def tune_conv2d_template(
             # scheduling will be possible.
             space=ms.space_generator.ScheduleFn(
                 schedule_conv2d_for_tune,
-                sch_rules=[],
                 postprocs=[],
                 mutator_probs={},
             ),

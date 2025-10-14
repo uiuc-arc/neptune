@@ -22,14 +22,13 @@
  * \brief Statement simplifier based on analyzer
  */
 
-#include "../../tir/transforms/simplify.h"
-
 #include <tvm/arith/analyzer.h>
 #include <tvm/runtime/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
+#include <tvm/tir/schedule/utils.h>
 #include <tvm/tir/transform.h>
 
 #include <optional>
@@ -146,7 +145,8 @@ TVM_REGISTER_PASS_CONFIG_OPTION("tir.Simplify", SimplifyConfig);
 class StmtSimplifier : public IRMutatorWithAnalyzer {
  public:
   static PrimFunc Apply(PrimFunc func, Analyzer* analyzer,
-                        Optional<SimplifyConfig> config_opt = NullOpt) {
+                        Optional<SimplifyConfig> config_opt = NullOpt,
+                        BlockMap* block_map = nullptr) {
     auto config = config_opt.value_or(AttrsWithDefaultValues<arith::SimplifyConfig>());
     analyzer->rewrite_simplify.SetEnabledExtensions(config->GetEnabledExtensions());
 
@@ -159,20 +159,25 @@ class StmtSimplifier : public IRMutatorWithAnalyzer {
     std::unordered_set<const VarNode*> used_in_buffer_def =
         CollectVarsUsedInBufferDefinition(func->body);
     StmtSimplifier simplifier(analyzer, config, std::move(touch_pattern),
-                              std::move(used_in_buffer_def));
+                              std::move(used_in_buffer_def), block_map);
     simplifier.MarkBufferMapShapes(func);
     func.CopyOnWrite()->body = simplifier(func->body);
+    if (block_map) {
+      block_map->PruneOverStmt(func->body);
+    }
     return func;
   }
 
  private:
   explicit StmtSimplifier(Analyzer* analyzer, SimplifyConfig config,
                           std::optional<ControlFlowGraph> touch_pattern,
-                          std::unordered_set<const VarNode*> used_in_buffer_def)
+                          std::unordered_set<const VarNode*> used_in_buffer_def,
+                          BlockMap* block_map)
       : IRMutatorWithAnalyzer(analyzer),
         config_(config),
         touch_pattern_(touch_pattern),
-        used_in_buffer_def_(used_in_buffer_def) {}
+        used_in_buffer_def_(used_in_buffer_def),
+        block_map_(block_map) {}
 
   using Parent = IRMutatorWithAnalyzer;
   using Parent::VisitExpr_;
@@ -195,6 +200,14 @@ class StmtSimplifier : public IRMutatorWithAnalyzer {
     Stmt output = Parent::VisitStmt(stmt);
     this->current_stmt_ = std::move(cache);
     return output;
+  }
+
+  Stmt VisitStmt_(const BlockNode* op) final {
+    auto ret = Downcast<Block>(Parent::VisitStmt_(op));
+    if (block_map_) {
+      block_map_->Insert(GetRef<Block>(op), ret);
+    }
+    return ret;
   }
 
   Stmt VisitStmt_(const ForNode* op) final {
@@ -337,14 +350,16 @@ class StmtSimplifier : public IRMutatorWithAnalyzer {
   Map<Var, PrimExpr> non_inlined_bindings_;
   Optional<Stmt> current_stmt_{NullOpt};
   std::unordered_set<const VarNode*> used_in_buffer_def_;
+
+  BlockMap* block_map_;
 };
 
 }  // namespace arith
 
 namespace tir {
 
-PrimFunc Simplify(PrimFunc func, arith::Analyzer* analyzer) {
-  return arith::StmtSimplifier::Apply(std::move(func), analyzer);
+PrimFunc Simplify(PrimFunc func, arith::Analyzer* analyzer, BlockMap* block_map) {
+  return arith::StmtSimplifier::Apply(std::move(func), analyzer, NullOpt, block_map);
 }
 
 namespace transform {

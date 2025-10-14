@@ -129,8 +129,6 @@ SliceDoc::SliceDoc(Optional<ExprDoc> start, Optional<ExprDoc> stop, Optional<Exp
 }
 
 AssignDoc::AssignDoc(ExprDoc lhs, Optional<ExprDoc> rhs, Optional<ExprDoc> annotation) {
-  CHECK(rhs.defined() || annotation.defined())
-      << "ValueError: At least one of rhs and annotation needs to be non-null for AssignDoc.";
   CHECK(lhs->IsInstance<IdDocNode>() || annotation == nullptr)
       << "ValueError: annotation can only be nonnull if lhs is an identifier.";
 

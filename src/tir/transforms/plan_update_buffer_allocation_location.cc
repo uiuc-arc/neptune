@@ -23,6 +23,7 @@
  */
 
 #include <tvm/tir/analysis.h>
+#include <tvm/tir/schedule/utils.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 #include <tvm/tir/var.h>
@@ -102,7 +103,8 @@ class BufferAllocateOrderCollector : public StmtExprVisitor {
 
 class BufferAllocationLocator : public StmtExprMutator {
  public:
-  explicit BufferAllocationLocator(const PrimFunc& func) {
+  explicit BufferAllocationLocator(const PrimFunc& func, BlockMap* block_map)
+      : block_map_(block_map) {
     Map<Buffer, Optional<Stmt>> buffer_lca = DetectBufferAccessLCA(func);
     // The buffer_alloc_recorder Array is used to keep the buffer allocation order
     // since the buffer_lca Map is unordered.
@@ -160,7 +162,6 @@ class BufferAllocationLocator : public StmtExprMutator {
   }
 
   Stmt VisitStmt_(const BlockNode* op) final {
-    ICHECK(!op->init.defined());
     Array<Buffer> alloc_buffers;
     auto it = alloc_buffers_.find(op);
     if (it != alloc_buffers_.end()) {
@@ -175,6 +176,7 @@ class BufferAllocationLocator : public StmtExprMutator {
       ICHECK(buffer_data_to_buffer_.count(source_var));
       buffer_data_to_buffer_.Set(target_var, match_buffer->buffer);
     }
+    Block before = GetRef<Block>(op);
     Stmt stmt = StmtMutator::VisitStmt_(op);
     op = stmt.as<BlockNode>();
     ICHECK(op != nullptr);
@@ -197,6 +199,9 @@ class BufferAllocationLocator : public StmtExprMutator {
     // Erase buffer allocated inside the block from access region.
     n->reads = RemoveRedundantBufferRegion(n->reads);
     n->writes = RemoveRedundantBufferRegion(n->writes);
+    if (block_map_) {
+      block_map_->Insert(before, Block(n));
+    }
     return Stmt(n);
   }
 
@@ -239,13 +244,15 @@ class BufferAllocationLocator : public StmtExprMutator {
   Map<Var, Buffer> buffer_data_to_buffer_;
   /*! \brief Buffers that are allocated within a BlockNode, and may be moved. */
   std::unordered_set<const VarNode*> managed_allocations_;
+  /*! \brief A mapping from unmodified old blocks to the modified blocks. */
+  BlockMap* block_map_;
 };
 
-PrimFunc PlanAndUpdateBufferAllocationLocation(PrimFunc func) {
+PrimFunc PlanAndUpdateBufferAllocationLocation(PrimFunc func, BlockMap* block_map) {
   // Only apply this pass to TIR that is not from TE schedules
   if (!IsFromLegacyTESchedule(func)) {
     auto fptr = func.CopyOnWrite();
-    BufferAllocationLocator locator(func);
+    BufferAllocationLocator locator(func, block_map);
     fptr->body = locator(fptr->body);
     return func;
   } else {

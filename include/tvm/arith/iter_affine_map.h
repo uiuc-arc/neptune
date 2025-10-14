@@ -413,6 +413,17 @@ Array<Array<IterMark>> SubspaceDivide(const Array<PrimExpr>& bindings,
                                       IterMapLevel check_level, arith::Analyzer* analyzer,
                                       bool simplify_trivial_iterators = true);
 
+/*! \brief SubspaceDivide with an alternative interface.
+    Returns a vector of pairs of marks, and a pair of predicates.
+    Throws an error on failure instead of silently returning an empty vector. */
+using MarkPair = std::pair<IterMark, IterMark>;
+using PredPair = std::pair<PrimExpr, PrimExpr>;
+std::pair<std::vector<MarkPair>, PredPair> SubspaceDivide(const Array<PrimExpr>& bindings,
+                                                          const Map<Var, Range>& var_domain,
+                                                          const std::vector<Var>& inner_vars,
+                                                          const PrimExpr& predicate,
+                                                          Analyzer& analyzer);
+
 /*!
  * \brief Given an expression that may contain IterMapExpr, transform it to normal PrimExpr.
  * \param expr The input expression, which may contain IterMapExpr.

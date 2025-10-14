@@ -58,7 +58,6 @@ class TIRVisitorWithPath : protected ExprFunctor<void(const PrimExpr&, ObjectPat
   virtual void Visit(const GlobalVar& obj, ObjectPath path) {}
   virtual void Visit(const Range& obj, ObjectPath path);
   virtual void Visit(const Buffer& obj, ObjectPath path);
-  virtual void Visit(const BufferRegion& obj, ObjectPath path);
   virtual void Visit(const MatchBufferRegion& obj, ObjectPath path);
   virtual void Visit(const IterVar& obj, ObjectPath path);
 
@@ -108,6 +107,7 @@ class TIRVisitorWithPath : protected ExprFunctor<void(const PrimExpr&, ObjectPat
   void VisitStmt_(const AllocateConstNode* op, ObjectPath path) override;
   void VisitStmt_(const DeclBufferNode* op, ObjectPath path) override;
   void VisitStmt_(const BufferStoreNode* op, ObjectPath path) override;
+  void VisitStmt_(const BufferRegionStoreNode* op, ObjectPath path) override;
   void VisitStmt_(const BufferRealizeNode* op, ObjectPath path) override;
   void VisitStmt_(const AssertStmtNode* op, ObjectPath path) override;
   void VisitStmt_(const ProducerStoreNode* op, ObjectPath path) override;
@@ -122,6 +122,7 @@ class TIRVisitorWithPath : protected ExprFunctor<void(const PrimExpr&, ObjectPat
   void VisitExpr_(const VarNode* op, ObjectPath path) override;
   void VisitExpr_(const SizeVarNode* op, ObjectPath path) override;
   void VisitExpr_(const BufferLoadNode* op, ObjectPath path) override;
+  void VisitExpr_(const BufferRegionNode* op, ObjectPath path) override;
   void VisitExpr_(const ProducerLoadNode* op, ObjectPath path) override;
   void VisitExpr_(const LetNode* op, ObjectPath path) override;
   void VisitExpr_(const CallNode* op, ObjectPath path) override;

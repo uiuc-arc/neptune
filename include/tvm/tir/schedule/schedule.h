@@ -600,6 +600,7 @@ class ScheduleNode : public runtime::Object {
    * \param block The block to be inlined to its producer
    */
   virtual void ReverseComputeInline(const BlockRV& block) = 0;
+
   /******** Schedule: Reduction ********/
   /*!
    * \brief Decompose a reduction block into two separate blocks.
@@ -632,9 +633,27 @@ class ScheduleNode : public runtime::Object {
    *                    buffer. Suppose the original reduction block writes to buffer `B` with
    *                    ndim(B) dimensions, then `factor_axis` should be in range `[-ndim(B) - 1,
    *                    ndim(B)]`, and the negative index will be normalized to a non-negative one
+   * \param merge_loops Whether to merge the loop nests of the rfactor block and the original
+   *                    (write-back) block. If true, they will be merged at `loop_sref`; otherwise,
+   *                    these blocks will be separated.
    * \return The rfactor block
    */
-  virtual BlockRV RFactor(const LoopRV& loop_rv, int factor_axis) = 0;
+  virtual BlockRV RFactor(const LoopRV& loop_rv, int factor_axis, bool merge_loops = false) = 0;
+  /*!
+   * \brief Generalized operator fusion. Fuses a reduction block under a reduction loop.
+   * \sa See `tir::RollingUpdate` for more details.
+   * \param block_rv The block to operate on (the `b0` in the description above)
+   * \param loop_rv The loop under which the block is fused (the `l` in the description above)
+   * \param factor_axis The position where the new dimension is placed in the new introduced rfactor
+   *        buffer. See `RFactor` for more details.
+   * \return Block random variable to the newly created rfactor block. The write-back block is
+   * repurposed from `b0`, and its BlockRV is still valid.
+   */
+  virtual BlockRV RollingUpdate(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                int factor_axis) = 0;
+
+  virtual BlockRV SplitKUpdate(const BlockRV& block_rv, const LoopRV& loop_rv, int factor_axis) = 0;
+
   /******** Schedule: Block annotation ********/
   /*!
    * \brief Set alignment requirement for specific dimension such that
@@ -834,9 +853,24 @@ class ScheduleNode : public runtime::Object {
    */
   virtual void RollingBuffer(const BlockRV& block_rv, int write_buffer_index) = 0;
 
+  virtual Array<BlockRV> SplitScanBuffer(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                         int write_buffer_index) = 0;
+
   /******** Schedule: Misc ********/
   /*! \brief A no-op that marks the start of postprocessing phase of scheduling */
   virtual void EnterPostproc() = 0;
+
+  /*!
+   \brief Propagate if-then-else condition of the given block to all blocks under the loop, then
+   try to extract a common condition and lift it closer to the loop.
+   \sa See `tir::PropagateIfThenElse` for more details.
+   \param block_rv The block to extract the condition from.
+   \param loop_rv The loop context for propagation.
+   \param registered_handler A registered Python function that generates a TIR kernel to handle
+   any runtime condition.
+  */
+  virtual void PropagateIfThenElse(const BlockRV& block_rv, const LoopRV& loop_rv,
+                                   String registered_handler) = 0;
 
   /*!
    * \brief Hide some buffer access in the given block.
@@ -846,6 +880,22 @@ class ScheduleNode : public runtime::Object {
    */
   virtual void UnsafeHideBufferAccess(const BlockRV& block_rv, const String& buf_type,
                                       const Array<IntImm>& buf_index_array) = 0;
+
+  /******** Schedule: Function passes (buffer compactification, loop-tile conversion) ********/
+
+  /*!
+   \brief Re-locate allocated buffers and compactify them, using two TIR function passes:
+   \ref PlanAndUpdateBufferAllocationLocation, and \ref CompactBufferAllocation.
+   Takes effect over the entire current function.
+  */
+  virtual void CompactBuffer() = 0;
+
+  /*!
+   \brief Convert the current function from loop form (the default form of TIR) to "tile-expression"
+   form. First auto-blockize the body of the function, then tensorize the blockized stmts.
+   \param blockize_hints Loops at which blockization is requested.
+  */
+  virtual void ToTileExprForm(const Array<LoopRV>& blockize_hints) = 0;
 };
 
 /*!

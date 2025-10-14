@@ -27,6 +27,7 @@
 #include <tvm/node/script_printer.h>
 
 #include <iostream>
+#include <optional>
 #include <string>
 
 namespace tvm {
@@ -88,6 +89,8 @@ TVM_DLL void Dump(const runtime::ObjectRef& node);
  */
 TVM_DLL void Dump(const runtime::Object* node);
 
+TVM_DLL std::string AsRepr(const runtime::ObjectRef& node);
+
 }  // namespace tvm
 
 namespace tvm {
@@ -107,4 +110,69 @@ inline std::string AsLegacyRepr(const ObjectRef& n) {
 }  // namespace runtime
 using runtime::AsLegacyRepr;
 }  // namespace tvm
+
+namespace std {
+
+template <typename T>
+std::ostream& operator<<(std::ostream& os, const std::vector<T>& n) {
+  os << "[";
+  for (size_t i = 0; i < n.size(); ++i) {
+    if (i != 0) os << ", ";
+    os << n[i];
+  }
+  os << "]";
+  return os;
+}
+
+template <typename T>
+std::ostream& operator<<(std::ostream& os, const std::optional<T>& n) {
+  return (n.has_value() ? (os << n.value()) : (os << "nullopt"));
+}
+
+template <typename K, typename V, typename T1, typename T2>
+std::ostream& operator<<(std::ostream& os, const std::unordered_map<K, V, T1, T2>& n) {
+  os << "{";
+  for (auto it = n.begin(); it != n.end(); ++it) {
+    if (it != n.begin()) os << ", ";
+    os << it->first << ": " << it->second;
+  }
+  os << "}";
+  return os;
+}
+
+template <typename K, typename T1, typename T2>
+std::ostream& operator<<(std::ostream& os, const std::unordered_set<K, T1, T2>& n) {
+  os << "{";
+  for (auto it = n.begin(); it != n.end(); ++it) {
+    if (it != n.begin()) os << ", ";
+    os << *it;
+  }
+  os << "}";
+  return os;
+}
+
+template <typename T1, typename T2>
+std::ostream& operator<<(std::ostream& os, const std::pair<T1, T2>& n) {
+  os << "(" << n.first << ", " << n.second << ")";
+  return os;
+}
+
+template <typename... Ts, size_t... Is>
+void PrintTuple(std::ostream& os, const std::tuple<Ts...>& n, std::index_sequence<Is...>) {
+  os << "(";
+  ((os << std::get<Is>(n) << ", "), ...);
+  os << std::get<sizeof...(Ts) - 1>(n) << ")";
+}
+
+template <typename... Ts>
+std::ostream& operator<<(std::ostream& os, const std::tuple<Ts...>& n) {
+  if (sizeof...(Ts) == 0) {
+    os << "()";
+    return os;
+  }
+  PrintTuple(os, n, std::make_index_sequence<sizeof...(Ts) - 1>{});
+  return os;
+}
+}  // namespace std
+
 #endif  // TVM_NODE_REPR_PRINTER_H_

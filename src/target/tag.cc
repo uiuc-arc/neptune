@@ -429,6 +429,12 @@ TVM_REGISTER_TAG_AWS_C5("aws/cpu/c5.24xlarge", 48, "cascadelake");
 
 #undef TVM_REGISTER_TAG_AWS_C5
 
+#if TVM_LLVM_VERSION >= 190
+#define APPLE_MCPU "apple-m4"
+#else
+#define APPLE_MCPU "apple-latest"
+#endif
+
 #define TVM_REGISTER_METAL_GPU_TAG(Name, ThreadsPerBlock, SharedMem, WarpSize)   \
   TVM_REGISTER_TARGET_TAG(Name).set_config(                                      \
       {{"kind", String("metal")},                                                \
@@ -437,7 +443,7 @@ TVM_REGISTER_TAG_AWS_C5("aws/cpu/c5.24xlarge", 48, "cascadelake");
        {"thread_warp_size", runtime::Int(WarpSize)},                             \
        {"host", Map<String, ObjectRef>{{"kind", String("llvm")},                 \
                                        {"mtriple", String("arm64-apple-macos")}, \
-                                       {"mcpu", String("apple-latest")}}}});
+                                       {"mcpu", String(APPLE_MCPU)}}}});
 
 #if TVM_LLVM_HAS_AARCH64_TARGET
 TVM_REGISTER_METAL_GPU_TAG("apple/m1-gpu", 1024, 32768, 32);

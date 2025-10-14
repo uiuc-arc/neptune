@@ -247,6 +247,12 @@ TVM_DLL Array<Array<BufferRegion>> GetBlockAccessRegion(const Block& block,
 TVM_DLL Array<Array<BufferRegion>> GetBlockReadWriteRegion(const Block& block,
                                                            const Map<Var, Buffer>& buffer_var_map);
 
+/*!
+ * \brief An overload of GetBlockReadWriteRegion that doesn't require a buffer_var_map. It will
+ * ignore all opaque accesses and function call accesses.
+ */
+std::pair<Array<BufferRegion>, Array<BufferRegion>> GetBlockReadWriteRegion(const Block& block);
+
 /*! \brief Helper struct for return value of IdentifyMemCpy
  *
  * This helper struct is not strictly necessary, as `IdentifyMemCpy`

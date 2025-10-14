@@ -1081,7 +1081,7 @@ Array<StmtSRef> GetOutputBlocks(const ScheduleState& self, const BlockNode* scop
 }
 
 ProducerConsumerSplit ProducerConsumerSplit::Find(
-    const ScheduleState& self, const Array<Stmt>& subtrees,
+    const ScheduleState& self, const Stmt& root, const Stmt& loop_body,
     const Array<StmtSRef>& producer_block_srefs, const Array<StmtSRef>& consumer_block_srefs,
     std::unordered_map<const BlockNode*, const BlockRealizeNode*>* block2realize) {
   class InsertionPointNotFoundError : public ScheduleError {
@@ -1117,63 +1117,89 @@ ProducerConsumerSplit ProducerConsumerSplit::Find(
 
   class Finder : public StmtVisitor {
    public:
+    Finder(const ScheduleState& self, const Stmt& loop_body,
+           const Array<StmtSRef>& producer_block_srefs, const Array<StmtSRef>& consumer_block_srefs,
+           std::unordered_map<const BlockNode*, const BlockRealizeNode*>* block2realize)
+        : self_(self), loop_body_(loop_body), block2realize_(block2realize) {
+      // Set up the lookup table for producers
+      producer_blocks_.reserve(producer_block_srefs.size());
+      for (const StmtSRef& block_sref : producer_block_srefs) {
+        producer_blocks_.insert(block_sref->stmt);
+      }
+      // Set up the lookup table for consumers
+      consumer_blocks_.reserve(consumer_block_srefs.size());
+      for (const StmtSRef& block_sref : consumer_block_srefs) {
+        consumer_blocks_.insert(block_sref->stmt);
+      }
+    }
+
+    void VisitStmt(const Stmt& stmt) final {
+      if (!stmt.same_as(loop_body_)) {
+        StmtVisitor::VisitStmt(stmt);
+        return;
+      }
+      ICHECK(!positions_) << "Visited loop_body_ multiple times";
+      pos_to_loop_body_ = 0;
+      // Visit the subtrees
+      auto subtrees = AsArray(loop_body_);
+      int n = subtrees.size();
+      int last_producer_position = -1, first_consumer_position = n;
+      for (int i = 0; i < n; ++i) {
+        int n_producers_visited_before = n_producers_visited_,
+            n_consumers_visited_before = n_consumers_visited_;
+        StmtVisitor::VisitStmt(subtrees[i]);
+        // Check if the subtree contains at least a producer
+        if (n_producers_visited_ != n_producers_visited_before) {
+          last_producer_position = i;
+        }
+        // Check if the subtree contains at least a consumer
+        if (n_consumers_visited_ != n_consumers_visited_before) {
+          if (first_consumer_position == n) {
+            first_consumer_position = i;
+          }
+        }
+      }
+      pos_to_loop_body_ = 1;
+      if (last_producer_position >= first_consumer_position) {
+        throw InsertionPointNotFoundError(self_->mod, last_producer_position,
+                                          first_consumer_position);
+      }
+      positions_ = {last_producer_position, first_consumer_position};
+    }
+
     void VisitStmt_(const BlockRealizeNode* realize) final {
       const BlockNode* block = realize->block.get();
       if (block2realize_) {
         block2realize_->emplace(block, realize);
       }
-      if (producer_blocks_.count(block)) {
+      // Count producer blocks -- exclude producer blocks found after the loop body
+      if (producer_blocks_.count(block) && pos_to_loop_body_ != 1) {
         ++this->n_producers_visited_;
       }
-      if (consumer_blocks_.count(block)) {
+      // Count consumer blocks -- exclude consumer blocks found before the loop body
+      if (consumer_blocks_.count(block) && pos_to_loop_body_ != -1) {
         ++this->n_consumers_visited_;
       }
     }
 
+    const ScheduleState& self_;
+    const Stmt& loop_body_;
+
     std::unordered_map<const BlockNode*, const BlockRealizeNode*>* block2realize_;
-    std::unordered_set<const StmtNode*> producer_blocks_;
-    std::unordered_set<const StmtNode*> consumer_blocks_;
-    int n_producers_visited_ = 0;
-    int n_consumers_visited_ = 0;
+    std::unordered_set<const StmtNode*> producer_blocks_, consumer_blocks_;
+    std::optional<std::pair<int, int>> positions_;
+    int n_producers_visited_ = 0, n_consumers_visited_ = 0;
+    // Describes where we're now in the tree. -1: before loop_body_; 0: in loop_body_; 1: after
+    // loop_body_. This is used to exclude producers and consumers that are in unacceptable
+    // positions.
+    int pos_to_loop_body_ = -1;
   };
 
-  Finder finder;
-  finder.block2realize_ = block2realize;
-  // Set up the lookup table for producers
-  finder.producer_blocks_.reserve(producer_block_srefs.size());
-  for (const StmtSRef& block_sref : producer_block_srefs) {
-    finder.producer_blocks_.insert(block_sref->stmt);
-  }
-  // Set up the lookup table for consumers
-  finder.consumer_blocks_.reserve(consumer_block_srefs.size());
-  for (const StmtSRef& block_sref : consumer_block_srefs) {
-    finder.consumer_blocks_.insert(block_sref->stmt);
-  }
-  // Visit the subtrees
-  int n = subtrees.size();
-  int last_producer_position = -1;
-  int first_consumer_position = n;
-  for (int i = 0; i < n; ++i) {
-    int n_producers_visited_before = finder.n_producers_visited_;
-    int n_consumers_visited_before = finder.n_consumers_visited_;
-    finder(subtrees[i]);
-    // Check if the subtree contains at least a producer
-    if (finder.n_producers_visited_ != n_producers_visited_before) {
-      last_producer_position = i;
-    }
-    // Check if the subtree contains at least a consumer
-    if (finder.n_consumers_visited_ != n_consumers_visited_before) {
-      if (first_consumer_position == n) {
-        first_consumer_position = i;
-      }
-    }
-  }
-  if (last_producer_position >= first_consumer_position) {
-    throw InsertionPointNotFoundError(self->mod, last_producer_position, first_consumer_position);
-  }
-  return ProducerConsumerSplit{last_producer_position,       //
-                               first_consumer_position,      //
-                               finder.n_producers_visited_,  //
+  Finder finder(self, loop_body, producer_block_srefs, consumer_block_srefs, block2realize);
+  finder(root);
+  ICHECK(finder.positions_) << "InternalError: Cannot find the insertion point";
+  auto& pos = finder.positions_.value();
+  return ProducerConsumerSplit{pos.first, pos.second, finder.n_producers_visited_,
                                finder.n_consumers_visited_};
 }
 
@@ -2120,6 +2146,52 @@ Optional<AutoTensorizeMappingInfo> GetAutoTensorizeMappingInfo(const tir::Schedu
 }
 
 TVM_REGISTER_NODE_TYPE(AutoTensorizeMappingInfoNode);
+
+/******** Utilities for conditional bounds ********/
+
+struct RelaxVarFromCondMutator : public ExprMutator {
+ public:
+  RelaxVarFromCondMutator(const Map<Var, arith::IntSet>& dom_map, RelaxationMode mode)
+      : dom_map_(dom_map), mode_(mode) {}
+
+ private:
+  PrimExpr VisitExpr_(const LENode* op) { return RelaxLE(op->a, op->b); }
+  PrimExpr VisitExpr_(const LTNode* op) {
+    // a < b => a + 1 <= b
+    return RelaxLE(op->a + 1, op->b);
+  }
+  PrimExpr VisitExpr_(const GENode* op) {
+    // a >= b => b <= a
+    return RelaxLE(op->b, op->a);
+  }
+  PrimExpr VisitExpr_(const GTNode* op) {
+    // a > b => b < a => b + 1 <= a
+    return RelaxLE(op->b + 1, op->a);
+  }
+
+  PrimExpr RelaxLE(const PrimExpr& a, const PrimExpr& b) {
+    // If mode_ == kExists, we're looking for `exists x1 in [l1, h1], x2 in [l2, h2], ... : cond`,
+    // which is equivalent to `exists a in [a1, a2], b in [b1, b2], a <= b`.
+    // where `[a1, a2] = EvalSet(a, dom_map_)` and `[b1, b2] = EvalSet(b, dom_map_)`.
+    arith::IntSet aset = arith::EvalSet(a, dom_map_), bset = arith::EvalSet(b, dom_map_);
+    if (mode_ == RelaxationMode::kExists) {
+      // This means `[a1, a2]` and `[b1, b2]` has a non-empty intersection, therefore `a1 <= b2`.
+      return LE(aset.min(), bset.max());
+    } else {
+      // Similarly if mode_ == kForAll, we get `forall a in [a1, a2], b in [b1, b2], a <= b`,
+      // which is equivalent to `a2 <= b1`.
+      return LE(aset.max(), bset.min());
+    }
+  }
+
+  const Map<Var, arith::IntSet>& dom_map_;
+  RelaxationMode mode_;
+};
+
+PrimExpr RelaxVarFromCondition(const PrimExpr& expr, const Map<Var, arith::IntSet>& dom_map,
+                               RelaxationMode mode) {
+  return RelaxVarFromCondMutator(dom_map, mode)(expr);
+}
 
 TVM_REGISTER_GLOBAL("tir.schedule.GetAutoTensorizeMappingInfo")
     .set_body_typed([](Schedule sch, BlockRV block, PrimFunc desc_func) {

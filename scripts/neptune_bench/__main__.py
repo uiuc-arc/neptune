@@ -74,7 +74,7 @@ RUNNERS: dict[BenchmarkOperator, Sequence[BenchmarkRunner]] = {
     ],
     # This "softcap" operator is causal + GQA + softcap.
     ops.PF_SOFTCAP: [
-        *nep.NeptuneGQARunner.e(
+        *nep.NeptuneGQARunner.create_flex_from_schedulers(
             ops.PF_SOFTCAP,
             score_mod=nep.tir_softcap(softcap=ops.PF_SOFTCAP.softcap),
             mask_cond=lambda b, h0, h1, q_idx, kv_idx: q_idx >= kv_idx,
